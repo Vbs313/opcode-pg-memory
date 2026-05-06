@@ -1,15 +1,13 @@
 {
   "name": "opcode-pg-memory",
-  "version": "2.2.8",
-  "type": "commonjs",
-  "description": "OpenCode plugin for persistent memory using PostgreSQL + pgvector �?four-layer memory architecture with topic segmentation",
+  "version": "2.3.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "opcode-pg-memory": "dist/cli.js"
   },
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir ./dist --target node --format cjs && bun build ./src/cli.ts --outfile ./dist/cli.js --target node --format cjs && bun build ./mcp-server.ts --outfile ./dist/mcp-server.js --target node --format cjs && tsc --emitDeclarationOnly",
+    "build": "tsc && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && bun build ./mcp-server.ts --outfile ./dist/mcp-server.js --target node",
     "typecheck": "tsc --noEmit",
     "clean": "rimraf dist"
   },
@@ -62,9 +60,11 @@
     "rimraf": "^5.0.5",
     "jest": "^29.7.0",
     "ts-jest": "^29.1.1",
-    "@types/jest": "^29.5.10"
+    "@types/jest": "^29.5.10",
+    "bun-types": "latest"
   },
   "engines": {
     "node": ">=18.0.0"
   }
 }
+

@@ -7,6 +7,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import type { SyncMode } from "./types";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
 const CONFIG_FILES = [
@@ -30,6 +31,8 @@ export interface PgMemoryConfig {
   maxMemories?: number;
   logLevel?: "debug" | "info" | "warn" | "error";
   compactionThreshold?: number;
+  syncMode?: SyncMode;
+  pollingIntervalMs?: number;
 }
 
 // ── Defaults ──────────────────────────────────────────
@@ -47,6 +50,8 @@ const DEFAULTS: Required<Omit<PgMemoryConfig, "pgPassword">> = {
   maxMemories: 10,
   logLevel: "info",
   compactionThreshold: 0.80,
+  syncMode: "hybrid",
+  pollingIntervalMs: 5000,
 };
 
 // ── Helpers ───────────────────────────────────────────
@@ -90,6 +95,8 @@ export const CONFIG = {
   maxMemories: fileConfig.maxMemories ?? DEFAULTS.maxMemories,
   logLevel: (process.env.PG_MEMORY_LOG_LEVEL || fileConfig.logLevel || DEFAULTS.logLevel) as "debug" | "info" | "warn" | "error",
   compactionThreshold: fileConfig.compactionThreshold ?? DEFAULTS.compactionThreshold,
+  syncMode: (process.env.PG_MEMORY_SYNC_MODE || fileConfig.syncMode || 'hybrid') as SyncMode,
+  pollingIntervalMs: parseInt(process.env.PG_MEMORY_POLL_INTERVAL || String(fileConfig.pollingIntervalMs || '5000'), 10),
 };
 
 export function isConfigured(): boolean {

@@ -10,8 +10,11 @@ import { recallMemory, RecallMemoryInput } from './mcp/recall-memory';
 import { hindsightReflect } from './mcp/hindsight-reflect';
 import { createCacheManager, SemanticCacheManager } from './cache/semantic-cache';
 import { createLogger } from './services/logger';
+import { OpenCodeDBPollingSource } from './services/db-polling';
+import { EventSynchronizer } from './services/event-synchronizer';
 const logger = createLogger('plugin');
 import { PluginConfig, HindsightReflectInput, RetrievedFact } from './types';
+import type { PluginEvent, PluginEventType } from './types';
 import { calculateTokenBudget } from './utils/token-budget';
 import { detectMemoryKeyword, MEMORY_NUDGE_MESSAGE } from './services/keyword';
 
@@ -209,16 +212,34 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
   const plugin = new OpenCodePGMemoryPlugin(config);
   await plugin.initialize();
 
+  const pool = plugin.getPool();
+  const cacheManager = plugin.getCacheManager();
+  const logger = createLogger('plugin');
+  const eventSync = new EventSynchronizer(pool, {
+    mode: (process.env.PG_MEMORY_SYNC_MODE || 'hybrid') as any,
+    pollingIntervalMs: parseInt(process.env.PG_MEMORY_POLL_INTERVAL || '5000'),
+  });
+
+  let dbPolling: OpenCodeDBPollingSource | null = null;
+  if (process.env.PG_MEMORY_DB_POLLING !== 'false') {
+    dbPolling = new OpenCodeDBPollingSource(pool, eventSync, {
+      intervalMs: parseInt(process.env.PG_MEMORY_POLL_INTERVAL || '5000'),
+      maxBatchSize: 100,
+      backoffBaseMs: 1000,
+      backoffMaxMs: 60000,
+    });
+    dbPolling.start().catch(err => logger.warn('DB polling start failed', err));
+  }
+
   // Cleanup on process exit
   const cleanup = () => {
+    if (dbPolling) dbPolling.stop();
     plugin.close().catch((err) => logger.error('Cleanup error:', err));
   };
   process.on('exit', cleanup);
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
 
-  const pool = plugin.getPool();
-  const cacheManager = plugin.getCacheManager();
   // Track sessions that have received memory injection
   const injectedSessions = new Set<string>();
   const injectedSystemPrompt = new Set<string>();
@@ -233,201 +254,21 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
     // -----------------------------------------------------------------------
     event: async (input: { event: { type: string; properties: Record<string, any> } }) => {
       const { type, properties } = input.event;
-
       try {
-        switch (type) {
-          // --- session.created: ensure session_map entry, inject memories ---
-          case 'session.created': {
-            const sessionData = properties.session || properties;
-            const output: { context?: { memories?: string[]; facts?: string[] } } = {};
+        const sid = properties.sessionID || properties.session?.id;
+        if (!sid) return;
 
-            await handleSessionCreated(
-              { session: normalizeSessionData(sessionData) },
-              output as any,
-              pool,
-              {
-                contextLimitRatio: plugin.config.tokenBudget.contextLimitRatio,
-                minTokens: plugin.config.tokenBudget.minTokens,
-                maxTokens: plugin.config.tokenBudget.maxTokens,
-              }
-            );
-
-            // Attempt to inject memories via client if available
-            if (output.context?.memories?.length && ctx.client?.experimental?.chat?.system?.transform) {
-              try {
-                for (const memory of output.context.memories) {
-                  await ctx.client.experimental.chat.system.transform(memory);
-                }
-              } catch (err) {
-                logger.warn('Failed to inject memories via client:', err);
-              }
-            }
-            break;
-          }
-
-          // --- session.compacted: mark cache entries as pruned ---
-          case 'session.compacted': {
-            const sid = properties.sessionID || properties.session?.id;
-            if (sid) {
-              await handleSessionCompacted(
-                {
-                  session: { id: sid },
-                  messagesToCompact: properties.messagesToCompact || [],
-                  compactionStrategy: properties.compactionStrategy || 'prune',
-                },
-                {} as any,
-                pool
-              );
-
-              // Also mark cache entries as pruned via cache manager
-              if (cacheManager && properties.messagesToCompact?.length) {
-                try {
-                  const obsResult = await pool.query(
-                    'SELECT id FROM observations WHERE session_id = (SELECT id FROM session_map WHERE opencode_session_id = $1) AND message_id = ANY($2)',
-                    [sid, properties.messagesToCompact]
-                  );
-                  if (obsResult.rows.length > 0) {
-                    await cacheManager.markMultipleAsPruned(obsResult.rows.map((r: any) => r.id));
-                  }
-                } catch (err) {
-                  logger.warn('Failed to mark cache pruned:', err);
-                }
-              }
-
-              // Save compaction summary as reflection
-              const summaryText = properties.summary || properties.compactionSummary;
-              if (summaryText && String(summaryText).length >= 100) {
-                try {
-                  const sessionResult = await pool.query(
-                    'SELECT id FROM session_map WHERE opencode_session_id = $1',
-                    [sid]
-                  );
-                  if (sessionResult.rows.length > 0) {
-                    await pool.query(`
-                      INSERT INTO reflections (session_id, summary, source_observation_ids, confidence, pattern_type, metadata)
-                      VALUES ($1, $2, $3, $4, $5, $6)
-                    `, [
-                      sessionResult.rows[0].id,
-                      `[Session Summary] ${String(summaryText)}`,
-                      properties.messageIds || [],
-                      0.8,
-                      'session_summary',
-                      JSON.stringify({ savedAt: new Date().toISOString() }),
-                    ]);
-                    logger.info('Saved session summary as reflection', { sessionID: sid });
-                  }
-                } catch (err) {
-                  logger.warn('Failed to save session summary', err);
-                }
-              }
-            }
-            break;
-          }
-
-          // --- session.deleted: cleanup related data ---
-          case 'session.deleted': {
-            const sid = properties.sessionID || properties.session?.id;
-            if (sid) {
-              try {
-                const sessionResult = await pool.query(
-                    'SELECT id FROM session_map WHERE opencode_session_id = $1',
-                    [sid]
-                  );
-                  if (sessionResult.rows.length > 0) {
-                    const internalId = sessionResult.rows[0].id;
-                    // CASCADE deletes handle observations, entities, relations, reflections, token_logs
-                    await pool.query('DELETE FROM session_map WHERE id = $1', [internalId]);
-                  logger.info(`Cleaned up deleted session: ${sid}`);
-                }
-              } catch (err) {
-                logger.error('Error cleaning up deleted session:', err);
-              }
-            }
-            break;
-          }
-
-          // --- session.idle / session.completed: trigger reflection ---
-          case 'session.idle':
-          case 'session.completed': {
-            const sid = properties.sessionID || properties.session?.id;
-            const sessionInfo = properties.session || {};
-            if (sid) {
-              await handleSessionCompleted(
-                {
-                  session: {
-                    id: sid,
-                    projectId: sessionInfo.projectId,
-                    messageCount: properties.messageCount || sessionInfo.messageCount || 0,
-                    durationMs: properties.durationMs || sessionInfo.durationMs || 0,
-                  },
-                  summary: properties.summary,
-                },
-                {} as any,
-                pool,
-                {
-                  minObservationThreshold: plugin.config.reflection.observationThreshold,
-                  enableReflection: plugin.config.reflection.enabled,
-                  offPeakHours: plugin.config.reflection.offPeakHours,
-                }
-              );
-            }
-            break;
-          }
-
-          // --- message.updated: extract entities (fire-and-forget, non-blocking) ---
-          case 'message.updated': {
-            const sid = properties.sessionID || properties.session?.id;
-            if (sid && properties.message) {
-              handleMessageUpdated(
-                { session: { id: sid }, message: properties.message },
-                {} as any,
-                pool
-              ).catch((err) => logger.warn('message.updated handler error:', err));
-            }
-            break;
-          }
-
-          // --- message.part.updated: accumulate tool output ---
-          case 'message.part.updated': {
-            // Handled by message-part-updated internals (accumulator),
-            // we just ensure the session is tracked
-            break;
-          }
-
-          // --- tool.execute.after (fallback if direct hook not used) ---
-          case 'tool.execute.after': {
-            const sid = properties.sessionID || properties.session?.id;
-            if (sid) {
-              const result = properties.result || {
-                success: properties.success !== false,
-                data: properties.output || properties.data,
-                error: properties.error,
-              };
-              await handleToolExecuteAfter(
-                {
-                  session: { id: sid },
-                  tool: {
-                    name: properties.tool || properties.toolName || 'unknown',
-                    parameters: properties.args || properties.parameters || {},
-                  },
-                  result,
-                  messageId: properties.callID || properties.messageId || '',
-                  executionTimeMs: properties.executionTimeMs || 0,
-                },
-                {} as any,
-                pool
-              );
-            }
-            break;
-          }
-
-          default:
-            // Unknown event type - silently ignore
-            break;
-        }
+        await eventSync.handleEvent({
+          id: `${type}:${sid}:${Date.now()}`,
+          type: type as PluginEventType,
+          sessionId: sid,
+          timestamp: Date.now(),
+          version: 1,
+          source: 'hook',
+          data: properties,
+        });
       } catch (error) {
-        logger.error(`Error handling event '${type}':`, error);
-        // Never let hook errors propagate to OpenCode
+        console.error(`[PG Memory] Error handling event '${type}':`, error);
       }
     },
 
@@ -909,3 +750,6 @@ export * from './utils/token-budget';
 export * from './cache/semantic-cache';
 export { recallMemory } from './mcp/recall-memory';
 export { hindsightReflect } from './mcp/hindsight-reflect';
+
+// Default export for OpenCode plugin loader
+export default OpenCodePGMemory;

@@ -9,6 +9,28 @@
 export type EntityTier = 'permanent' | 'project' | 'session';
 export type RelationType = 'belongs_to' | 'depends_on' | 'references' | 'implements' | 'uses' | 'custom';
 
+export type PluginEventType =
+  | 'session.created' | 'session.completed' | 'session.deleted'
+  | 'message.updated' | 'tool.execute.before' | 'tool.execute.after'
+  | 'session.compacted' | 'session.idle';
+
+export type SyncMode = 'event-only' | 'poll-only' | 'hybrid';
+
+export interface PluginEvent {
+  id: string;           // `${type}:${sessionId}:${timestamp}`
+  type: PluginEventType;
+  sessionId: string;
+  timestamp: number;
+  version: number;
+  source: 'hook' | 'poll';
+  data: Record<string, any>;
+}
+
+export interface VersionedRow {
+  id: string;
+  version: number;
+}
+
 // ============================================================
 // Core database entities (with topic_segment_id added)
 // ============================================================
@@ -138,8 +160,11 @@ export interface CallerContext {
 // ============================================================
 
 export interface EventSynchronizerConfig {
-  mode: 'hooks' | 'polling' | 'event';
-  pollingIntervalMs?: number;
+  mode: SyncMode;
+  pollingIntervalMs: number;
+  retryMaxAttempts: number;
+  retryBaseDelayMs: number;
+  eventDedupWindowMs: number;
 }
 
 export interface TopicConfig {

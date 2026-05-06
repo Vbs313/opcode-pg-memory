@@ -5,3 +5,4 @@
  * The actual plugin logic lives in `src/index.ts`.
  */
 export * from './src/index';
+export { default } from './src/index';

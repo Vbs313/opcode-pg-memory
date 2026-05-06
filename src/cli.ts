@@ -162,6 +162,28 @@ function createReflectCommand(): boolean {
   return true;
 }
 
+const PG_MEMORY_NOTE_COMMAND = `---
+description: Record an observation for the current session
+---
+
+# PG Memory Note
+
+Record the recent work as an observation in the pg-memory database.
+
+Determine the current session ID, then insert:
+\`\`\`bash
+psql -h localhost -U opencode -d PGOMO -c "INSERT INTO observations (session_map_id, tool_name, tool_input_summary, tool_output_summary, importance) SELECT sm.id, 'TOOL_NAME', 'INPUT_SUMMARY', 'RESULT_SUMMARY', IMPORTANCE FROM session_map sm WHERE sm.opencode_session_id = 'ses_SESSION_ID';"
+\`\`\`
+`;
+
+function createNoteCommand(): boolean {
+  mkdirSync(OPENCODE_COMMAND_DIR, { recursive: true });
+  const notePath = join(OPENCODE_COMMAND_DIR, "pg-memory-note.md");
+  writeFileSync(notePath, PG_MEMORY_NOTE_COMMAND);
+  console.log("Created /pg-memory-note command");
+  return true;
+}
+
 const PG_MEMORY_SKILL = `# pg-memory — Long-term Memory for OpenCode
 
 You have access to persistent long-term memory via the pg-memory plugin. Use it to search historical knowledge and reflect on completed work.
@@ -309,6 +331,7 @@ if (cmd === "install") {
   createInitCommand();
   createSyncCommand();
   createReflectCommand();
+  createNoteCommand();
   createSkill();
   createAgentsTemplate();
   populateOpencodeCache();
@@ -379,3 +402,5 @@ async function syncSessions(): Promise<number> {
 console.error(`Unknown command: ${cmd}`);
 printHelp();
 process.exit(1);
+
+

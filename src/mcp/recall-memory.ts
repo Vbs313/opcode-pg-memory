@@ -89,11 +89,24 @@ export interface RecallMemoryConfig {
   };
   maxResults: number;
   rerankEnabled: boolean;
+  decay?: DecayConfig;
+}
+
+export interface DecayConfig {
+  enabled: boolean;
+  factor: number;       // per-day decay factor (0.99 = 1% per day)
+  maxAgeDays: number;    // entities older than this get filtered out
 }
 
 // ============================================================
 // Constants
 // ============================================================
+
+const DEFAULT_DECAY_CONFIG: DecayConfig = {
+  enabled: true,
+  factor: 0.99,
+  maxAgeDays: 365,
+};
 
 const DEFAULT_CONFIG: RecallMemoryConfig = {
   weights: {
@@ -103,6 +116,7 @@ const DEFAULT_CONFIG: RecallMemoryConfig = {
   },
   maxResults: 10,
   rerankEnabled: true,
+  decay: { ...DEFAULT_DECAY_CONFIG },
 };
 
 /** Topic-fusion blend ratio: 70% query + 30% topic */
@@ -186,11 +200,12 @@ export async function recallMemory(
     // ── Step 4: Merge & deduplicate ──
     const mergedResults = mergeAndDeduplicate(retrievalResults);
 
-    // ── Step 5: Multi-dimensional scoring ──
+    // ── Step 5: Multi-dimensional scoring (with time-based decay) ──
     const scoredResults = calculateMultiDimensionalScores(
       mergedResults,
       fusedEmbedding,
       mergedConfig.weights,
+      { ...DEFAULT_DECAY_CONFIG, ...mergedConfig.decay },
     );
 
     // ── Step 6: Apply filters ──
@@ -949,10 +964,11 @@ function calculateMultiDimensionalScores(
   facts: InternalFact[],
   _queryEmbedding: number[],
   weights: { semantic: number; recency: number; importance: number },
+  decayConfig: DecayConfig = DEFAULT_DECAY_CONFIG,
 ): InternalFact[] {
   const now = new Date();
 
-  return facts
+  let results = facts
     .map((fact) => {
       const semanticScore = fact.relevanceScore;
 
@@ -970,12 +986,36 @@ function calculateMultiDimensionalScores(
         weights.recency * recencyScore +
         weights.importance * importanceScore;
 
+      let relevanceScore = Math.round(finalScore * 1000) / 1000;
+
+      // ── Apply time-based entity weight decay ──
+      if (decayConfig.enabled) {
+        const metadata = fact.metadata || {};
+        const lastSeen = metadata.createdAt || fact._timestamp || Date.now();
+        const daysSinceLastSeen = (Date.now() - new Date(lastSeen).getTime()) / 86400000;
+
+        // Skip decay for permanent tier
+        if (metadata.tier !== 'permanent') {
+          // Apply exponential decay to relevanceScore
+          const decayedWeight = relevanceScore * Math.pow(decayConfig.factor, daysSinceLastSeen);
+          relevanceScore = Math.max(0.01, decayedWeight);
+
+          // Mark old, low-value results for filtering
+          if (daysSinceLastSeen > decayConfig.maxAgeDays && relevanceScore < 0.1) {
+            relevanceScore = 0;
+          }
+        }
+      }
+
       return {
         ...fact,
-        relevanceScore: Math.round(finalScore * 1000) / 1000,
+        relevanceScore,
       };
     })
+    .filter((r) => r.relevanceScore > 0)
     .sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+  return results;
 }
 
 // ============================================================
