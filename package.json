@@ -36,7 +36,8 @@
       "event",
       "tool.execute.before",
       "tool.execute.after",
-      "experimental.session.compacting"
+      "experimental.session.compacting",
+      "experimental.chat.system.transform"
     ]
   },
   "files": [
