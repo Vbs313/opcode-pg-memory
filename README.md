@@ -5,15 +5,6 @@
 [![npm](https://img.shields.io/npm/v/opcode-pg-memory)](https://www.npmjs.com/package/opcode-pg-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
-## 特性
-
-- **四层记忆** — Retain · Recall · Reflect · Semantic Cache
-- **话题段隔离** — 滑动窗口检测会话内话题切换，防止跨话题实体污染
-- **语义向量检索** — HNSW + BM25 + Graph + Keyword 四策略并行
-- **Agent 自主调用** — `caller_context` 上下文融合，关键词自动触发
-- **隐私过滤** — `<private>` 标签自动 [REDACTED]
-- **MCP 工具** — `recall_memory` / `hindsight_reflect`
-
 ## 安装
 
 ```bash

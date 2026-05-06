@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "opcode-pg-memory": "./dist/cli.js"
+    "opcode-pg-memory": "dist/cli.js"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && bun build ./mcp-server.ts --outfile ./dist/mcp-server.js --target node && tsc --emitDeclarationOnly",
@@ -27,7 +27,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Vbs313/opcode-pg-memory"
+    "url": "git+https://github.com/Vbs313/opcode-pg-memory.git"
   },
   "opencode": {
     "type": "plugin",
