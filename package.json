@@ -1,6 +1,6 @@
 {
   "name": "opcode-pg-memory",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "OpenCode plugin for persistent memory using PostgreSQL + pgvector — four-layer memory architecture with topic segmentation",
   "type": "module",
   "main": "dist/index.js",
