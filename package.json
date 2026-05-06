@@ -24,7 +24,7 @@
     "agent"
   ],
   "author": "Vbs313",
-  "license": "MIT",
+  "license": "GPL-3.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Vbs313/opcode-pg-memory.git"

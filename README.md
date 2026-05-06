@@ -3,7 +3,7 @@
 **OpenCode 长期记忆插件** — PostgreSQL + pgvector 四层记忆架构，话题隔离 · Agent 自主调用 · OmO 多 Agent 协调
 
 [![npm](https://img.shields.io/npm/v/opcode-pg-memory)](https://www.npmjs.com/package/opcode-pg-memory)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 ## 安装
 
@@ -120,4 +120,4 @@ mcp-server.ts       # MCP 服务入口
 
 ## License
 
-MIT
+[GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.html)
