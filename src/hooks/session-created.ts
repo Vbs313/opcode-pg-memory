@@ -36,7 +36,7 @@ const DEFAULT_CONFIG: SessionCreatedHandlerConfig = {
  * 处理 session.created 事件
  * 
  * 功能：
- * 1. 创建或更新 sessions 表记录
+ * 1. 创建或更新 session_map 表记录
  * 2. 基于 Token 预算检索 entities 和 reflections
  * 3. 优先注入 permanent 级别事实，其次 project，最后 session
  * 
@@ -99,14 +99,14 @@ async function upsertSession(
   pool: Pool
 ): Promise<void> {
   const query = `
-    INSERT INTO sessions (external_id, project_id, model_context_limit, metadata)
+    INSERT INTO session_map (opencode_session_id, project_id, model_context_limit, metadata)
     VALUES ($1, $2, $3, $4)
-    ON CONFLICT (external_id) 
+    ON CONFLICT (opencode_session_id) 
     DO UPDATE SET 
       project_id = EXCLUDED.project_id,
       model_context_limit = EXCLUDED.model_context_limit,
-      updated_at = NOW(),
-      metadata = sessions.metadata || EXCLUDED.metadata
+      last_active_at = NOW(),
+      metadata = session_map.metadata || EXCLUDED.metadata
   `;
   
   await pool.query(query, [

@@ -66,21 +66,52 @@ export class OpenCodeSchemaAdapter {
   connect(): boolean {
     if (this.db) return true;
     try {
+      // Try bun:sqlite first (faster, native)
       const { Database } = require('bun:sqlite') as any;
       this.db = new Database(this.path);
       this.detectDrizzleVersion();
       return true;
-    } catch (err: any) {
-      logger.warn('Failed to connect to OpenCode SQLite', { path: this.path, error: err.message });
-      return false;
+    } catch {
+      try {
+        // Fall back to better-sqlite3 (Node.js compatible)
+        const Database = require('better-sqlite3');
+        this.db = new Database(this.path);
+        this.detectDrizzleVersion();
+        return true;
+      } catch (err: any) {
+        logger.warn('No SQLite driver available', { path: this.path, error: err.message });
+        return false;
+      }
     }
   }
 
   private detectDrizzleVersion(): void {
     try {
-      const rows = this.db?.query('SELECT count(*) as cnt FROM __drizzle_migrations').all() || [];
+      const rows = this.queryAll('SELECT count(*) as cnt FROM __drizzle_migrations');
       this.drizzleVersion = rows.length > 0 ? (rows[0] as any).cnt || 0 : 0;
     } catch { this.drizzleVersion = 0; }
+  }
+
+  /** Unified query helper — supports both bun:sqlite and better-sqlite3 APIs */
+  private queryAll(sql: string, ...params: any[]): any[] {
+    if (!this.db) return [];
+    try {
+      if (typeof this.db.query === 'function') {
+        return this.db.query(sql).all(...params);
+      }
+      return this.db.prepare(sql).all(...params);
+    } catch { return []; }
+  }
+
+  /** Unified single-row query helper */
+  private queryGet(sql: string, ...params: any[]): any {
+    if (!this.db) return null;
+    try {
+      if (typeof this.db.query === 'function') {
+        return this.db.query(sql).get(...params);
+      }
+      return this.db.prepare(sql).get(...params);
+    } catch { return null; }
   }
 
   isConnected(): boolean { return this.db !== null; }
@@ -89,12 +120,11 @@ export class OpenCodeSchemaAdapter {
   // ── 会话 ─────────────────────────────────────────
 
   getRecentSessions(): SQLiteSession[] {
-    if (!this.db) return [];
     try {
-      return this.db.query(`
+      return this.queryAll(`
         SELECT id, title, time_created, agent, model
         FROM session ORDER BY time_created ASC
-      `).all() as SQLiteSession[];
+      `) as SQLiteSession[];
     } catch (err: any) {
       logger.warn('Failed to query sessions', { error: err.message });
       return [];
@@ -102,9 +132,8 @@ export class OpenCodeSchemaAdapter {
   }
 
   getSessionById(id: string): SQLiteSession | null {
-    if (!this.db) return null;
     try {
-      return this.db.query('SELECT id, title, time_created, agent FROM session WHERE id = ?').get(id) as SQLiteSession || null;
+      return this.queryGet('SELECT id, title, time_created, agent FROM session WHERE id = ?', id) as SQLiteSession || null;
     } catch { return null; }
   }
 
@@ -117,11 +146,10 @@ export class OpenCodeSchemaAdapter {
 
   /** 获取指定会话的全部消息（含 JSON 解析） */
   getMessagesBySession(sessionId: string): Array<{ id: string; meta: ParsedMessageMeta | null }> {
-    if (!this.db) return [];
     try {
-      const rows = this.db.query(`
+      const rows = this.queryAll(`
         SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC
-      `).all(sessionId) as Array<{ id: string; data: string }>;
+      `, sessionId) as Array<{ id: string; data: string }>;
       return rows.map(r => ({ id: r.id, meta: this.parseMessageMeta(r.data) }));
     } catch (err: any) {
       logger.warn('Failed to query messages', { sessionId, error: err.message });
@@ -131,13 +159,12 @@ export class OpenCodeSchemaAdapter {
 
   /** 获取增量消息（time_created > sinceTime） */
   getRecentMessages(sinceTime?: number): Array<{ id: string; session_id: string; meta: ParsedMessageMeta | null }> {
-    if (!this.db) return [];
     try {
       let sql = 'SELECT id, session_id, data, time_created FROM message';
       const params: any[] = [];
       if (sinceTime) { sql += ' WHERE time_created > ?'; params.push(sinceTime); }
       sql += ' ORDER BY time_created ASC';
-      const rows = this.db.query(sql).all(...params) as Array<{ id: string; session_id: string; data: string; time_created: number }>;
+      const rows = this.queryAll(sql, ...params) as Array<{ id: string; session_id: string; data: string; time_created: number }>;
       return rows.map(r => ({ id: r.id, session_id: r.session_id, meta: this.parseMessageMeta(r.data) }));
     } catch (err: any) {
       logger.warn('Failed to query recent messages', { error: err.message });
@@ -154,9 +181,8 @@ export class OpenCodeSchemaAdapter {
 
   /** 获取指定消息的全部部件 */
   getPartsByMessage(messageId: string): ParsedPart[] {
-    if (!this.db) return [];
     try {
-      const rows = this.db.query('SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC').all(messageId) as Array<{ data: string }>;
+      const rows = this.queryAll('SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC', messageId) as Array<{ data: string }>;
       return rows.map(r => this.parsePart(r.data)).filter(Boolean) as ParsedPart[];
     } catch (err: any) {
       logger.warn('Failed to query parts', { messageId, error: err.message });
@@ -174,7 +200,7 @@ export class OpenCodeSchemaAdapter {
   /** 获取指定会话的全部工具调用（两段式：message → part） */
   getToolCallsBySession(sessionId: string): Array<{ messageId: string; tool: string; callID?: string; input?: any; output?: any; status?: string }> {
     const results: Array<any> = [];
-    const msgs = this.db?.query('SELECT id FROM message WHERE session_id = ? ORDER BY time_created ASC').all(sessionId) as Array<{ id: string }> || [];
+    const msgs = this.queryAll('SELECT id FROM message WHERE session_id = ? ORDER BY time_created ASC', sessionId) as Array<{ id: string }>;
     for (const msg of msgs) {
       const tools = this.getToolCallsByMessage(msg.id);
       for (const t of tools) {
@@ -195,8 +221,8 @@ export class OpenCodeSchemaAdapter {
   healthCheck(): { ok: boolean; drizzleVersion: number; sessionCount: number; messageCount: number } {
     try {
       if (!this.db) return { ok: false, drizzleVersion: 0, sessionCount: 0, messageCount: 0 };
-      const sc = (this.db.query('SELECT count(*) as c FROM session').get() as any)?.c || 0;
-      const mc = (this.db.query('SELECT count(*) as c FROM message').get() as any)?.c || 0;
+      const sc = (this.queryGet('SELECT count(*) as c FROM session') as any)?.c || 0;
+      const mc = (this.queryGet('SELECT count(*) as c FROM message') as any)?.c || 0;
       return { ok: true, drizzleVersion: this.drizzleVersion, sessionCount: sc, messageCount: mc };
     } catch {
       return { ok: false, drizzleVersion: 0, sessionCount: 0, messageCount: 0 };

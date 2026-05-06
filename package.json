@@ -1,6 +1,6 @@
 {
   "name": "opcode-pg-memory",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -45,26 +45,27 @@
     "README.md"
   ],
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.5.0",
+    "better-sqlite3": "^12.9.0",
+    "dotenv": "^16.3.1",
+    "openai": "^4.20.0",
     "pg": "^8.11.3",
     "pgvector": "^0.1.8",
-    "@modelcontextprotocol/sdk": "^0.5.0",
-    "uuid": "^9.0.1",
-    "openai": "^4.20.0",
-    "dotenv": "^16.3.1"
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/jest": "^29.5.10",
     "@types/node": "^20.10.0",
     "@types/pg": "^8.10.9",
     "@types/uuid": "^9.0.7",
-    "typescript": "^5.3.2",
-    "rimraf": "^5.0.5",
+    "bun-types": "latest",
     "jest": "^29.7.0",
+    "rimraf": "^5.0.5",
     "ts-jest": "^29.1.1",
-    "@types/jest": "^29.5.10",
-    "bun-types": "latest"
+    "typescript": "^5.3.2"
   },
   "engines": {
     "node": ">=18.0.0"
   }
 }
-
