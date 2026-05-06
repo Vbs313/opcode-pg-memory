@@ -222,6 +222,7 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
 
   // Track sessions that have received memory injection
   const injectedSessions = new Set<string>();
+  const injectedSystemPrompt = new Set<string>();
 
   // ==========================================================================
   // Return hooks object
@@ -552,6 +553,43 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
     },
 
     // -----------------------------------------------------------------------
+    // experimental.chat.system.transform - inject MCP tool usage instructions
+    // -----------------------------------------------------------------------
+    'experimental.chat.system.transform': async (
+      input: { sessionID?: string; model: { id: string; contextLimit: number; name: string } },
+      output: { system: string[] }
+    ) => {
+      try {
+        const sessionId = input.sessionID || 'default';
+        if (injectedSystemPrompt.has(sessionId)) return;
+        injectedSystemPrompt.add(sessionId);
+
+        output.system = output.system || [];
+        output.system.push(`## PG Memory Tools Available
+
+You have access to long-term memory via the pg-memory plugin. These tools help you reuse knowledge across sessions:
+
+### recall_memory — search historical memories
+Call this BEFORE starting any new task. It retrieves relevant entities, observations, and reflections from past sessions.
+- Example: recall_memory({ query: "database connection pool tuning" })
+- Best practice: always pass your current task goal as the query
+
+### hindsight_reflect — reflect on session
+Call this AFTER completing significant work to extract reusable patterns.
+- Example: hindsight_reflect({ trigger_type: "manual" })
+- Reflexions are automatically available in future sessions
+
+### When to use
+- Before diving into a new problem → recall_memory(query=<your goal>)
+- After completing a major task → hindsight_reflect()
+- When you need historical context about a specific topic → recall_memory(topic_segment_id=<id>)
+`);
+      } catch (error) {
+        console.error('[PG Memory] Error in system.transform:', error);
+      }
+    },
+
+    // -----------------------------------------------------------------------
     // experimental.session.compacting - session compaction hook
     // -----------------------------------------------------------------------
     'experimental.session.compacting': async (
@@ -809,6 +847,7 @@ function formatMemoryContext(facts: RetrievedFact[]): string {
     const score = f.relevanceScore ? ` (${(f.relevanceScore * 100).toFixed(0)}%)` : '';
     lines.push(`- [${typeLabel}${tierLabel}] ${f.content.substring(0, 200)}${score}`);
   }
+  lines.push('', 'Tip: Use recall_memory(query="...") to search more specific memories, or /pg-memory-reflect to summarize this session.');
   return lines.join('\n');
 }
 

@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
+const OPENCODE_SKILLS_DIR = join(homedir(), ".config", "opencode", "skills");
 const PLUGIN_NAME = "opcode-pg-memory";
 const REPO_URL = "https://github.com/Vbs313/opcode-pg-memory";
 
@@ -160,6 +161,34 @@ function createReflectCommand(): boolean {
   return true;
 }
 
+const PG_MEMORY_SKILL = `# pg-memory — Long-term Memory for OpenCode
+
+You have access to persistent long-term memory via the pg-memory plugin. Use it to search historical knowledge and reflect on completed work.
+
+## Available Tools
+
+### recall_memory — Search Historical Memories
+Search for relevant entities, observations, and reflections from past sessions.
+Call BEFORE starting any new task.
+- recall_memory({ query: "your task goal" })
+
+### hindsight_reflect — Summarize Session
+Extract reusable patterns and lessons.
+Call AFTER completing significant work.
+- hindsight_reflect({ trigger_type: "manual" })
+
+## Best Practice
+Always call recall_memory(query=<current task goal>) before working on a new problem.
+`;
+
+function createSkill(): boolean {
+  mkdirSync(OPENCODE_SKILLS_DIR, { recursive: true });
+  const skillPath = join(OPENCODE_SKILLS_DIR, "pg-memory.md");
+  writeFileSync(skillPath, PG_MEMORY_SKILL);
+  console.log("Created pg-memory skill");
+  return true;
+}
+
 function printHelp(): void {
   console.log(`
 pg-memory - PostgreSQL-backed long-term memory for OpenCode
@@ -206,6 +235,7 @@ if (cmd === "install") {
   createInitCommand();
   createSyncCommand();
   createReflectCommand();
+  createSkill();
   console.log("\nSetup complete!");
   console.log("\nNext steps:");
   console.log(`  1. cd ${process.cwd()}`);
