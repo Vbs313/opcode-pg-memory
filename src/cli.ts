@@ -120,9 +120,11 @@ pg-memory - PostgreSQL-backed long-term memory for OpenCode
 
 Commands:
   install    Register plugin and create /pg-memory-init command
+  sync       Sync OpenCode sessions from SQLite to PostgreSQL
 
 Examples:
   bunx opcode-pg-memory install
+  bunx opcode-pg-memory sync
   git clone ${REPO_URL} && cd opcode-pg-memory && bun run build
 
 After installation, configure the MCP server in opencode.jsonc:
@@ -163,6 +165,61 @@ if (cmd === "install") {
   console.log("  3. bun install && bun run build");
   console.log("  4. Restart OpenCode\n");
   process.exit(0);
+}
+
+if (cmd === "sync") {
+  syncSessions().then(code => process.exit(code));
+}
+
+async function syncSessions(): Promise<number> {
+  console.log("\nSyncing OpenCode sessions to PostgreSQL...\n");
+  try {
+    // @ts-ignore - bun:sqlite is a built-in bun module
+    const { Database } = await import("bun:sqlite");
+    const { Pool } = await import("pg");
+
+    const opencodeDb = join(homedir(), ".local", "share", "opencode", "opencode.db");
+    if (!existsSync(opencodeDb)) {
+      console.error("OpenCode database not found at:", opencodeDb);
+      return 1;
+    }
+
+    const sqlite = new Database(opencodeDb);
+    const rows = sqlite.query("SELECT id, title FROM session").all() as { id: string; title?: string }[];
+    console.log(`OpenCode sessions: ${rows.length}`);
+
+    const pgPool = new Pool({
+      host: process.env.PG_HOST || "localhost",
+      port: parseInt(process.env.PG_PORT || "5432"),
+      database: process.env.PG_DATABASE || "PGOMO",
+      user: process.env.PG_USER || "opencode",
+      password: process.env.PG_PASSWORD || "",
+    });
+
+    const existing = await pgPool.query("SELECT opencode_session_id FROM session_map");
+    const existingIds = new Set(existing.rows.map((r: any) => r.opencode_session_id));
+    console.log(`PG sessions: ${existingIds.size}`);
+
+    let inserted = 0;
+    for (const row of rows) {
+      if (!existingIds.has(row.id)) {
+        await pgPool.query(
+          "INSERT INTO session_map (opencode_session_id) VALUES ($1) ON CONFLICT DO NOTHING",
+          [row.id]
+        );
+        inserted++;
+        console.log(`  + ${row.id}  ${(row.title || "").substring(0, 50)}`);
+      }
+    }
+
+    console.log(`\nInserted: ${inserted}, Total: ${existingIds.size + inserted}`);
+    await pgPool.end();
+    sqlite.close();
+    return 0;
+  } catch (err: any) {
+    console.error("Sync failed:", err.message);
+    return 1;
+  }
 }
 
 console.error(`Unknown command: ${cmd}`);
