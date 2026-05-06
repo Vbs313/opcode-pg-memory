@@ -1,6 +1,6 @@
 {
   "name": "opcode-pg-memory",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "OpenCode PostgreSQL Memory Plugin with pgvector - Hindsight-inspired four-layer memory architecture",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
