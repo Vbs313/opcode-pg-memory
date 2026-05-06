@@ -114,6 +114,29 @@ function createInitCommand(): boolean {
   return true;
 }
 
+const PG_MEMORY_SYNC_COMMAND = `---
+description: Sync OpenCode sessions from SQLite to PostgreSQL
+---
+
+# PG Memory Sync
+
+Run this command to sync historical OpenCode sessions into the pg-memory database:
+
+\`\`\`bash
+bunx opcode-pg-memory sync
+\`\`\`
+
+This imports all historical OpenCode sessions into the pg-memory PostgreSQL database for future retrieval.
+`;
+
+function createSyncCommand(): boolean {
+  mkdirSync(OPENCODE_COMMAND_DIR, { recursive: true });
+  const syncPath = join(OPENCODE_COMMAND_DIR, "pg-memory-sync.md");
+  writeFileSync(syncPath, PG_MEMORY_SYNC_COMMAND);
+  console.log("Created /pg-memory-sync command");
+  return true;
+}
+
 function printHelp(): void {
   console.log(`
 pg-memory - PostgreSQL-backed long-term memory for OpenCode
@@ -158,6 +181,7 @@ if (cmd === "install") {
     createNewConfig();
   }
   createInitCommand();
+  createSyncCommand();
   console.log("\nSetup complete!");
   console.log("\nNext steps:");
   console.log(`  1. cd ${process.cwd()}`);
