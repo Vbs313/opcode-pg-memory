@@ -2,26 +2,28 @@
  * OpenCode SQLite → PostgreSQL 轮询同步器
  *
  * 通过 OpenCodeSchemaAdapter 读取 SQLite 增量变化，构造 PluginEvent 并委托给 EventSynchronizer。
- * 不依赖 OpenCode 事件总线，兼容 TUI/CLI/Desktop/WebView 所有模式。
+ * 基于真实 OpenCode 数据库结构编写：
+ * - session: 扁平列 (id, title, time_created, agent, model)
+ * - message: data TEXT (JSON) → role, agent, modelID, tokens, time
+ * - part: data TEXT (JSON) → type(text/tool), tool, callID, state
+ * - event: data TEXT (JSON), type, aggregate_id, seq
  */
 import { Pool } from 'pg';
-import { OpenCodeSchemaAdapter } from './opencode-schema-adapter';
+import { OpenCodeSchemaAdapter, ParsedPart, ParsedMessageMeta } from './opencode-schema-adapter';
 import { EventSynchronizer } from './event-synchronizer';
 import { createLogger } from './logger';
-import type { PluginEvent, SyncMode, PluginEventType } from '../types';
+import type { PluginEvent, PluginEventType } from '../types';
 
 const logger = createLogger('db-polling');
 
 export interface DBPollingConfig {
   intervalMs: number;
-  maxBatchSize: number;
   backoffBaseMs: number;
   backoffMaxMs: number;
 }
 
 const DEFAULT_CONFIG: DBPollingConfig = {
   intervalMs: 5000,
-  maxBatchSize: 100,
   backoffBaseMs: 1000,
   backoffMaxMs: 60000,
 };
@@ -34,7 +36,7 @@ export class OpenCodeDBPollingSource {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSyncTime: number = 0;
   private currentInterval: number;
-  private sessionIds = new Set<string>();
+  private knownSessions = new Set<string>();
 
   constructor(pool: Pool, synchronizer: EventSynchronizer, config?: Partial<DBPollingConfig>) {
     this.pool = pool;
@@ -46,17 +48,15 @@ export class OpenCodeDBPollingSource {
 
   async start(): Promise<void> {
     if (!this.adapter.connect()) {
-      logger.warn('DB polling: SQLite not available, skipping');
+      logger.warn('SQLite not available, polling disabled');
       return;
     }
-
-    // Load already-known session IDs from PG
+    // Load known sessions from PG
     try {
       const result = await this.pool.query('SELECT opencode_session_id FROM session_map');
-      for (const row of result.rows) this.sessionIds.add(row.opencode_session_id);
+      for (const row of result.rows) this.knownSessions.add(row.opencode_session_id);
     } catch {}
-
-    logger.info('DB polling started', { interval: this.config.intervalMs, knownSessions: this.sessionIds.size });
+    logger.info('DB polling started', { interval: this.config.intervalMs, knownSessions: this.knownSessions.size });
     this.timer = setInterval(() => this.sync(), this.currentInterval);
   }
 
@@ -66,49 +66,59 @@ export class OpenCodeDBPollingSource {
   }
 
   private async sync(): Promise<void> {
-    // Reconnect if needed (SQLite might have been reopened)
-    if (!this.adapter.isConnected()) {
-      if (!this.adapter.connect()) return;
-    }
+    if (!this.adapter.isConnected() && !this.adapter.connect()) return;
 
     try {
       // 1. Sync new sessions
       const sessions = this.adapter.getRecentSessions();
       for (const s of sessions) {
-        if (!this.sessionIds.has(s.id)) {
-          this.sessionIds.add(s.id);
-          await this.synchronizer.handleEvent(this.makeEvent('session.created', s.id, { projectId: null }));
+        if (!this.knownSessions.has(s.id)) {
+          this.knownSessions.add(s.id);
+          await this.synchronizer.handleEvent(this.event('session.created', s.id, { title: s.title, agent: s.agent }));
         }
       }
 
-      // 2. Sync new messages as observations
+      // 2. Sync recent messages (parse from JSON)
       const messages = this.adapter.getRecentMessages(this.lastSyncTime || undefined);
       for (const m of messages) {
-        if (!this.sessionIds.has(m.session_id)) continue;
-        await this.synchronizer.handleEvent(this.makeEvent('message.updated', m.session_id, { message: m }));
+        if (!this.knownSessions.has(m.session_id)) continue;
+        const role = m.meta?.role || 'unknown';
+        const agent = m.meta?.agent || m.meta?.modelID || undefined;
+
+        // Emit message.updated event
+        await this.synchronizer.handleEvent(this.event('message.updated', m.session_id, {
+          message: { id: m.id, role, agent },
+          message_id: m.id,
+        }));
+
+        // 3. For each message, check its parts for tool calls
+        const toolCalls = this.adapter.getToolCallsByMessage(m.id);
+        for (const tc of toolCalls) {
+          await this.synchronizer.handleEvent(this.event('tool.execute.after', m.session_id, {
+            toolName: tc.tool || 'unknown',
+            callID: tc.callID,
+            result: {
+              success: tc.state?.status === 'completed',
+              data: tc.state?.output,
+              error: tc.state?.status === 'failed' ? tc.state?.output : undefined,
+            },
+            executionTimeMs: 0,
+            parameters: tc.state?.input || {},
+          }));
+        }
       }
 
-      // Update tracking
       this.lastSyncTime = Date.now();
       this.currentInterval = this.config.intervalMs; // Reset on success
 
     } catch (err: any) {
       logger.warn('DB polling sync failed', { error: err.message });
-      // Exponential backoff: double interval up to max
       this.currentInterval = Math.min(this.currentInterval * 2, this.config.backoffMaxMs);
-      logger.info('DB polling backing off', { nextInterval: this.currentInterval });
+      logger.info('Backing off', { nextInterval: this.currentInterval });
     }
   }
 
-  private makeEvent(type: PluginEventType, sessionId: string, data: any): PluginEvent {
-    return {
-      id: `${type}:${sessionId}:${Date.now()}`,
-      type,
-      sessionId,
-      timestamp: Date.now(),
-      version: 1,
-      source: 'poll',
-      data,
-    };
+  private event(type: PluginEventType, sessionId: string, data: any): PluginEvent {
+    return { id: `${type}:${sessionId}:${Date.now()}`, type, sessionId, timestamp: Date.now(), version: 1, source: 'poll', data };
   }
 }

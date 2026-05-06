@@ -224,7 +224,6 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
   if (process.env.PG_MEMORY_DB_POLLING !== 'false') {
     dbPolling = new OpenCodeDBPollingSource(pool, eventSync, {
       intervalMs: parseInt(process.env.PG_MEMORY_POLL_INTERVAL || '5000'),
-      maxBatchSize: 100,
       backoffBaseMs: 1000,
       backoffMaxMs: 60000,
     });
