@@ -10,6 +10,7 @@ import { recallMemory, RecallMemoryInput } from './mcp/recall-memory';
 import { hindsightReflect } from './mcp/hindsight-reflect';
 import { createCacheManager, SemanticCacheManager } from './cache/semantic-cache';
 import { createLogger } from './services/logger';
+const logger = createLogger('plugin');
 import { PluginConfig, HindsightReflectInput, RetrievedFact } from './types';
 import { calculateTokenBudget } from './utils/token-budget';
 import { detectMemoryKeyword, MEMORY_NUDGE_MESSAGE } from './services/keyword';
@@ -130,7 +131,7 @@ class OpenCodePGMemoryPlugin {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    console.log('[PG Memory] Initializing plugin...');
+    logger.info('Initializing plugin...');
 
     try {
       this.pool = await initializeDatabase(this.config.database);
@@ -141,9 +142,9 @@ class OpenCodePGMemoryPlugin {
 
       this.startCleanupTasks();
       this.initialized = true;
-      console.log('[PG Memory] Plugin initialized successfully');
+      logger.info('Plugin initialized successfully');
     } catch (error) {
-      console.error('[PG Memory] Plugin initialization failed:', error);
+      logger.error('Plugin initialization failed:', error);
       throw error;
     }
   }
@@ -151,7 +152,7 @@ class OpenCodePGMemoryPlugin {
   async close(): Promise<void> {
     if (!this.initialized) return;
 
-    console.log('[PG Memory] Closing plugin...');
+    logger.info('Closing plugin...');
 
     for (const interval of this.cleanupIntervals) {
       clearInterval(interval);
@@ -163,7 +164,7 @@ class OpenCodePGMemoryPlugin {
     this.cacheManager = null;
     this.initialized = false;
 
-    console.log('[PG Memory] Plugin closed');
+    logger.info('Plugin closed');
   }
 
   private startCleanupTasks(): void {
@@ -210,7 +211,7 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
 
   // Cleanup on process exit
   const cleanup = () => {
-    plugin.close().catch((err) => console.error('[PG Memory] Cleanup error:', err));
+    plugin.close().catch((err) => logger.error('Cleanup error:', err));
   };
   process.on('exit', cleanup);
   process.on('SIGINT', cleanup);
@@ -218,8 +219,6 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
 
   const pool = plugin.getPool();
   const cacheManager = plugin.getCacheManager();
-  const logger = createLogger('plugin');
-
   // Track sessions that have received memory injection
   const injectedSessions = new Set<string>();
   const injectedSystemPrompt = new Set<string>();
@@ -260,7 +259,7 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
                   await ctx.client.experimental.chat.system.transform(memory);
                 }
               } catch (err) {
-                console.warn('[PG Memory] Failed to inject memories via client:', err);
+                logger.warn('Failed to inject memories via client:', err);
               }
             }
             break;
@@ -284,14 +283,14 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
               if (cacheManager && properties.messagesToCompact?.length) {
                 try {
                   const obsResult = await pool.query(
-                    'SELECT id FROM observations WHERE session_id = (SELECT id FROM sessions WHERE external_id = $1) AND message_id = ANY($2)',
+                    'SELECT id FROM observations WHERE session_id = (SELECT id FROM session_map WHERE opencode_session_id = $1) AND message_id = ANY($2)',
                     [sid, properties.messagesToCompact]
                   );
                   if (obsResult.rows.length > 0) {
                     await cacheManager.markMultipleAsPruned(obsResult.rows.map((r: any) => r.id));
                   }
                 } catch (err) {
-                  console.warn('[PG Memory] Failed to mark cache pruned:', err);
+                  logger.warn('Failed to mark cache pruned:', err);
                 }
               }
 
@@ -300,7 +299,7 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
               if (summaryText && String(summaryText).length >= 100) {
                 try {
                   const sessionResult = await pool.query(
-                    'SELECT id FROM sessions WHERE external_id = $1',
+                    'SELECT id FROM session_map WHERE opencode_session_id = $1',
                     [sid]
                   );
                   if (sessionResult.rows.length > 0) {
@@ -331,17 +330,17 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
             if (sid) {
               try {
                 const sessionResult = await pool.query(
-                  'SELECT id FROM sessions WHERE external_id = $1',
-                  [sid]
-                );
-                if (sessionResult.rows.length > 0) {
-                  const internalId = sessionResult.rows[0].id;
-                  // CASCADE deletes handle observations, entities, relations, reflections, token_logs
-                  await pool.query('DELETE FROM sessions WHERE id = $1', [internalId]);
-                  console.log(`[PG Memory] Cleaned up deleted session: ${sid}`);
+                    'SELECT id FROM session_map WHERE opencode_session_id = $1',
+                    [sid]
+                  );
+                  if (sessionResult.rows.length > 0) {
+                    const internalId = sessionResult.rows[0].id;
+                    // CASCADE deletes handle observations, entities, relations, reflections, token_logs
+                    await pool.query('DELETE FROM session_map WHERE id = $1', [internalId]);
+                  logger.info(`Cleaned up deleted session: ${sid}`);
                 }
               } catch (err) {
-                console.error('[PG Memory] Error cleaning up deleted session:', err);
+                logger.error('Error cleaning up deleted session:', err);
               }
             }
             break;
@@ -383,7 +382,7 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
                 { session: { id: sid }, message: properties.message },
                 {} as any,
                 pool
-              ).catch((err) => console.warn('[PG Memory] message.updated handler error:', err));
+              ).catch((err) => logger.warn('message.updated handler error:', err));
             }
             break;
           }
@@ -427,7 +426,7 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
             break;
         }
       } catch (error) {
-        console.error(`[PG Memory] Error handling event '${type}':`, error);
+        logger.error(`Error handling event '${type}':`, error);
         // Never let hook errors propagate to OpenCode
       }
     },
@@ -518,7 +517,7 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
           pool
         );
       } catch (error) {
-        console.error('[PG Memory] Error in tool.execute.before:', error);
+        logger.error('Error in tool.execute.before:', error);
       }
     },
 
@@ -548,7 +547,7 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
           pool
         );
       } catch (error) {
-        console.error('[PG Memory] Error in tool.execute.after:', error);
+        logger.error('Error in tool.execute.after:', error);
       }
     },
 
@@ -585,7 +584,7 @@ Call this AFTER completing significant work to extract reusable patterns.
 - When you need historical context about a specific topic → recall_memory(topic_segment_id=<id>)
 `);
       } catch (error) {
-        console.error('[PG Memory] Error in system.transform:', error);
+        logger.error('Error in system.transform:', error);
       }
     },
 
@@ -633,7 +632,7 @@ Call this AFTER completing significant work to extract reusable patterns.
           }, 500);
         }
       } catch (error) {
-        console.error('[PG Memory] Error in experimental.session.compacting:', error);
+        logger.error('Error in experimental.session.compacting:', error);
       }
     },
 

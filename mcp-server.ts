@@ -17,6 +17,9 @@ import { Pool } from 'pg';
 import { initializeDatabase, DatabaseConfig } from './src/db/init-db';
 import { recallMemory, RecallMemoryInput } from './src/mcp/recall-memory';
 import { hindsightReflect, HindsightReflectInput } from './src/mcp/hindsight-reflect';
+import { createLogger } from './src/services/logger';
+
+const logger = createLogger('mcp-server');
 
 // 配置加载：环境变量（由 OpenCode MCP config 的 environment 字段注入，或 .env 文件）
 const dbConfig: DatabaseConfig = {
@@ -138,15 +141,15 @@ const TOOLS: Tool[] = [
 ];
 
 async function main() {
-  console.error('[PG Memory MCP] Starting server...');
+  logger.info('Starting server...');
 
   // 初始化数据库
   let pool: Pool;
   try {
     pool = await initializeDatabase(dbConfig);
-    console.error('[PG Memory MCP] Database connected');
+    logger.info('Database connected');
   } catch (error) {
-    console.error('[PG Memory MCP] Database connection failed:', error);
+    logger.error('Database connection failed', error);
     process.exit(1);
   }
 
@@ -251,7 +254,7 @@ async function main() {
 
       throw new Error(`Unknown tool: ${name}`);
     } catch (error) {
-      console.error(`[PG Memory MCP] Error calling tool ${name}:`, error);
+      logger.error(`Error calling tool ${name}`, error);
       
       return {
         content: [
@@ -274,23 +277,23 @@ async function main() {
   // 连接服务器
   await server.connect(transport);
 
-  console.error('[PG Memory MCP] Server running on stdio');
+  logger.info('Server running on stdio');
 
   // 优雅关闭
   process.on('SIGINT', async () => {
-    console.error('[PG Memory MCP] Shutting down...');
+    logger.info('Shutting down...');
     await pool.end();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
-    console.error('[PG Memory MCP] Shutting down...');
+    logger.info('Shutting down...');
     await pool.end();
     process.exit(0);
   });
 }
 
 main().catch((error) => {
-  console.error('[PG Memory MCP] Fatal error:', error);
+  logger.error('Fatal error', error);
   process.exit(1);
 });

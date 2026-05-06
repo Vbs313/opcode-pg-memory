@@ -117,6 +117,7 @@ mcp-server.ts       # MCP 服务入口
 |------|------|
 | [USAGE_GUIDE.md](./USAGE_GUIDE.md) | 完整使用指南 — 配置 · 工具 · 运维 |
 | [PLUGIN_DOCUMENTATION.md](./PLUGIN_DOCUMENTATION.md) | 架构详解 — 钩子系统 · 数据库设计 |
+| [AGENTS.template.md](./AGENTS.template.md) | AGENTS.md 模板 — OmO directory-agents-injector 自动通知子代理 |
 
 ## License
 

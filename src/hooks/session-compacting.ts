@@ -1,5 +1,8 @@
 import { Pool } from 'pg';
 import { SessionCompactingInput, SessionCompactingOutput } from '../types';
+import { createLogger } from '../services/logger';
+
+const logger = createLogger('session-compacting');
 
 export interface SessionCompactingHandlerConfig {
   preserveHighImportanceObservations: boolean;
@@ -32,17 +35,17 @@ export async function handleSessionCompacting(
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const { session, messagesToCompact, compactionStrategy } = input;
   
-  console.log(`[PG Memory] Session compacting: ${session.id}, strategy: ${compactionStrategy}, messages: ${messagesToCompact.length}`);
+  logger.info(`Session compacting: ${session.id}, strategy: ${compactionStrategy}, messages: ${messagesToCompact.length}`);
   
   try {
     // 获取 session 内部 ID
     const sessionResult = await pool.query(
-      'SELECT id FROM sessions WHERE external_id = $1',
+      'SELECT id FROM session_map WHERE opencode_session_id = $1',
       [session.id]
     );
     
     if (sessionResult.rows.length === 0) {
-      console.warn(`[PG Memory] Session not found: ${session.id}`);
+      logger.warn(`Session not found: ${session.id}`);
       return;  // ✅ 返回 void
     }
     
@@ -76,14 +79,14 @@ export async function handleSessionCompacting(
       })
     ]);
     
-    console.log(`[PG Memory] Session compacting complete. Preserved ${preserveMessageIds.length} high-value messages`);
+    logger.info(`Session compacting complete. Preserved ${preserveMessageIds.length} high-value messages`);
     
     // ✅ 正确的钩子签名：mutate output (可选)
     if (preserveMessageIds.length > 0) {
       output.preserveMessageIds = preserveMessageIds;
     }
   } catch (error) {
-    console.error('[PG Memory] Error handling session.compacting:', error);
+    logger.error('Error handling session.compacting:', error);
     // 出错时不阻断主流程
   }
 }
@@ -121,7 +124,7 @@ async function markCacheEntriesAsPruned(
       )
   `, [sessionId, observationIds]);
   
-  console.log(`[PG Memory] Marked ${result.rowCount} cache entries as pruned`);
+  logger.info(`Marked ${result.rowCount} cache entries as pruned`);
 }
 
 /**
@@ -180,7 +183,7 @@ export async function handleSessionCompacted(
   pool: Pool,
   config: Partial<SessionCompactingHandlerConfig> = {}
 ): Promise<void> {
-  console.log(`[PG Memory] Session compacted: ${input.session.id}`);
+  logger.info(`Session compacted: ${input.session.id}`);
   
   // 压缩完成后的清理工作
   // ✅ 正确的钩子签名：不返回任何值
@@ -219,7 +222,7 @@ export async function getCompactionStats(
   highImportanceObservations: number;
 }> {
   const sessionResult = await pool.query(
-    'SELECT id FROM sessions WHERE external_id = $1',
+    'SELECT id FROM session_map WHERE opencode_session_id = $1',
     [sessionId]
   );
   

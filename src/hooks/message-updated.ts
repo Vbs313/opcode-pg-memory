@@ -7,6 +7,9 @@ import {
 } from '../types';
 import { estimateTokens } from '../utils/token-budget';
 import { stripPrivateContent } from '../services/privacy';
+import { createLogger } from '../services/logger';
+
+const logger = createLogger('message-updated');
 
 export interface MessageUpdatedHandlerConfig {
   minConfidence: number;
@@ -44,22 +47,22 @@ export async function handleMessageUpdated(
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const { session, message } = input;
   
-  console.log(`[PG Memory] Message updated: ${message.id}, role: ${message.role}`);
+  logger.info(`Message updated: ${message.id}, role: ${message.role}`);
   
   try {
     // 1. 存储原始消息（异步，不阻塞主流程）
     storeMessage(session.id, message, pool).catch(err => 
-      console.warn('[PG Memory] Failed to store message:', err.message)
+      logger.warn('Failed to store message:', err.message)
     );
     
     // 2. 获取 session 内部 ID
     const sessionResult = await pool.query(
-      'SELECT id FROM sessions WHERE external_id = $1',
+      'SELECT id FROM session_map WHERE opencode_session_id = $1',
       [session.id]
     );
     
     if (sessionResult.rows.length === 0) {
-      console.warn(`[PG Memory] Session not found: ${session.id}`);
+      logger.warn(`Session not found: ${session.id}`);
       return;  // ✅ 返回 void
     }
     
@@ -73,12 +76,12 @@ export async function handleMessageUpdated(
       pool,
       mergedConfig
     ).catch(err => 
-      console.warn('[PG Memory] Failed to extract entities:', err.message)
+      logger.warn('Failed to extract entities:', err.message)
     );
     
     // ✅ 正确的钩子签名：不返回任何值
   } catch (error) {
-    console.error('[PG Memory] Error handling message.updated:', error);
+    logger.error('Error handling message.updated:', error);
     // 出错时不阻断主流程
   }
 }
@@ -137,7 +140,7 @@ async function storeMessage(
         completed_at,
         embedding
       ) VALUES (
-        (SELECT id FROM sessions WHERE external_id = $1),
+        (SELECT id FROM session_map WHERE opencode_session_id = $1),
         $2, $3, $4, $5, $6, $7,
         $8, $9, $10, $11, $12, $13, $14, $15, $16,
         TO_TIMESTAMP($17/1000), 
@@ -177,9 +180,9 @@ async function storeMessage(
       message.time?.completed
     ]);
     
-    console.log(`[PG Memory] Stored message: ${message.id} (${message.role}, ${tokenTotal} tokens)`);
+    logger.info(`Stored message: ${message.id} (${message.role}, ${tokenTotal} tokens)`);
   } catch (error) {
-    console.error('[PG Memory] Failed to store message:', error);
+    logger.error('Failed to store message:', error);
     throw error;
   }
 }
@@ -201,7 +204,7 @@ async function extractEntitiesAndRelations(
     config
   );
   
-  console.log(`[PG Memory] Extracted ${extractedEntities.length} entities`);
+  logger.info(`Extracted ${extractedEntities.length} entities`);
   
   if (extractedEntities.length >= 2) {
     await extractAndStoreRelations(
@@ -270,7 +273,7 @@ async function extractEntities(
         type: extracted.type
       });
       
-      console.log(`[PG Memory] Updated entity: ${extracted.name} (weight: ${(currentWeight + 0.1).toFixed(2)})`);
+      logger.info(`Updated entity: ${extracted.name} (weight: ${(currentWeight + 0.1).toFixed(2)})`);
     } else {
       // 创建新实体
       const tier = determineEntityTier(extracted.type, content);
@@ -299,7 +302,7 @@ async function extractEntities(
         type: extracted.type
       });
       
-      console.log(`[PG Memory] Created entity: ${extracted.name} (${extracted.type})`);
+      logger.info(`Created entity: ${extracted.name} (${extracted.type})`);
     }
   }
   
@@ -416,7 +419,7 @@ async function extractAndStoreRelations(
           ]);
           
           relationsCreated++;
-          console.log(`[PG Memory] Created relation: ${source.name} ${relationType} ${target.name}`);
+          logger.info(`Created relation: ${source.name} ${relationType} ${target.name}`);
         }
       }
     }

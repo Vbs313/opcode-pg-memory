@@ -1,5 +1,8 @@
 import { Pool } from 'pg';
 import { MessagePartUpdatedInput, MessagePartUpdatedOutput } from '../types';
+import { createLogger } from '../services/logger';
+
+const logger = createLogger('message-part-updated');
 
 export interface MessagePartUpdatedHandlerConfig {
   maxContentLength: number;
@@ -39,17 +42,17 @@ export async function handleMessagePartUpdated(
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const { session, message } = input;
   
-  console.log(`[PG Memory] Message part updated: ${message.id}, partIndex: ${message.partIndex}, isComplete: ${message.isComplete}`);
+  logger.info(`Message part updated: ${message.id}, partIndex: ${message.partIndex}, isComplete: ${message.isComplete}`);
   
   try {
     // 获取 session 内部 ID
     const sessionResult = await pool.query(
-      'SELECT id FROM sessions WHERE external_id = $1',
+      'SELECT id FROM session_map WHERE opencode_session_id = $1',
       [session.id]
     );
     
     if (sessionResult.rows.length === 0) {
-      console.warn(`[PG Memory] Session not found: ${session.id}`);
+      logger.warn(`Session not found: ${session.id}`);
       return;  // ✅ 返回 void
     }
     
@@ -82,7 +85,7 @@ export async function handleMessagePartUpdated(
     
     // ✅ 正确的钩子签名：不返回任何值
   } catch (error) {
-    console.error('[PG Memory] Error handling message.part.updated:', error);
+    logger.error('Error handling message.part.updated:', error);
     // 出错时不阻断主流程
   }
 }
@@ -109,7 +112,7 @@ async function processCompletedParts(
     return;
   }
   
-  console.log(`[PG Memory] Processing completed parts for message: ${accumulator.messageId}`);
+  logger.info(`Processing completed parts for message: ${accumulator.messageId}`);
   
   // 生成摘要
   const summary = generatePartSummary(fullContent);
@@ -136,7 +139,7 @@ async function processCompletedParts(
     })
   ]);
   
-  console.log(`[PG Memory] Stored accumulated observation for message: ${accumulator.messageId}`);
+  logger.info(`Stored accumulated observation for message: ${accumulator.messageId}`);
 }
 
 /**
@@ -157,7 +160,7 @@ function scheduleAccumulationTimeout(
     const timeSinceLastUpdate = Date.now() - accumulator.lastUpdate;
     if (timeSinceLastUpdate >= timeoutMs * 0.8) {
       // 超时，强制处理
-      console.log(`[PG Memory] Accumulation timeout for message: ${accumulator.messageId}`);
+      logger.info(`Accumulation timeout for message: ${accumulator.messageId}`);
       await processCompletedParts(accumulatorKey, pool);
     }
   }, timeoutMs);
@@ -255,7 +258,7 @@ export function cleanupExpiredAccumulators(maxAgeMs: number = 300000): void {
   }
   
   if (cleaned > 0) {
-    console.log(`[PG Memory] Cleaned up ${cleaned} expired accumulators`);
+    logger.info(`Cleaned up ${cleaned} expired accumulators`);
   }
 }
 

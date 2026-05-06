@@ -1,5 +1,6 @@
 import { Pool, PoolClient } from 'pg';
 import pgvector from 'pgvector';
+import { createLogger } from '../services/logger';
 
 export interface DatabaseConfig {
   host: string;
@@ -24,6 +25,7 @@ export const DEFAULT_DB_CONFIG: DatabaseConfig = {
 export class DatabaseInitializer {
   private pool: Pool | null = null;
   private config: DatabaseConfig;
+  private logger = createLogger('init-db');
 
   constructor(config: Partial<DatabaseConfig> = {}) {
     this.config = { ...DEFAULT_DB_CONFIG, ...config };
@@ -62,9 +64,9 @@ export class DatabaseInitializer {
       const client = await this.pool!.connect();
       const result = await client.query('SELECT NOW() as now');
       client.release();
-      console.log('[PG Memory] Database connected:', result.rows[0].now);
+      this.logger.info('Database connected:', result.rows[0].now);
     } catch (error) {
-      console.error('[PG Memory] Database connection failed:', error);
+      this.logger.error('Database connection failed:', error);
       throw new Error(`Failed to connect to PostgreSQL: ${error}`);
     }
   }
@@ -96,10 +98,10 @@ export class DatabaseInitializer {
       await this.initializeOmOSchema(client);
 
       await client.query('COMMIT');
-      console.log('[PG Memory] Database schema initialized successfully');
+      this.logger.info('Database schema initialized successfully');
     } catch (error) {
       await client.query('ROLLBACK');
-      console.error('[PG Memory] Database setup failed:', error);
+      this.logger.error('Database setup failed:', error);
       throw error;
     } finally {
       client.release();
@@ -111,7 +113,7 @@ export class DatabaseInitializer {
       CREATE EXTENSION IF NOT EXISTS vector;
       CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
     `);
-    console.log('[PG Memory] Extensions created');
+    this.logger.info('Extensions created');
   }
 
   private async createEnums(client: PoolClient): Promise<void> {
@@ -127,7 +129,7 @@ export class DatabaseInitializer {
         END IF;
       END $$;
     `);
-    console.log('[PG Memory] Enums created');
+    this.logger.info('Enums created');
   }
 
   private async createTables(client: PoolClient): Promise<void> {
@@ -287,7 +289,7 @@ export class DatabaseInitializer {
       );
     `);
 
-    console.log('[PG Memory] Tables created');
+    this.logger.info('Tables created');
   }
 
   private async createIndexes(client: PoolClient): Promise<void> {
@@ -417,7 +419,7 @@ export class DatabaseInitializer {
       DROP INDEX IF EXISTS idx_token_usage_session;
     `);
 
-    console.log('[PG Memory] Indexes created');
+    this.logger.info('Indexes created');
   }
 
   /**
@@ -447,14 +449,14 @@ export class DatabaseInitializer {
           await client.query(`
             ALTER TABLE "${table}" RENAME COLUMN session_id TO session_map_id
           `);
-          console.log(`[PG Memory] Renamed ${table}.session_id → session_map_id`);
+          this.logger.info(`Renamed ${table}.session_id → session_map_id`);
         }
       } catch (err) {
         // 某些表可能没有旧列名（新安装），静默跳过
-        console.log(`[PG Memory] Skipped column rename for ${table}: ${err}`);
+        this.logger.info(`Skipped column rename for ${table}: ${err}`);
       }
     }
-    console.log('[PG Memory] Legacy column migration complete');
+    this.logger.info('Legacy column migration complete');
   }
 
   /**
@@ -471,7 +473,7 @@ export class DatabaseInitializer {
       `);
 
       if (exists.rows.length === 0) {
-        console.log('[PG Memory] No legacy sessions table found, skipping migration');
+        this.logger.info('No legacy sessions table found, skipping migration');
         return;
       }
 
@@ -487,9 +489,9 @@ export class DatabaseInitializer {
         ON CONFLICT (opencode_session_id) DO NOTHING;
       `);
 
-      console.log('[PG Memory] Legacy sessions data migrated to session_map');
+      this.logger.info('Legacy sessions data migrated to session_map');
     } catch (error) {
-      console.warn('[PG Memory] Sessions migration warning (non-fatal):', error);
+      this.logger.warn('Sessions migration warning (non-fatal):', error);
     }
   }
 
@@ -499,11 +501,11 @@ export class DatabaseInitializer {
                        process.env.OMO_INTEGRATION === 'enabled';
 
     if (!omOEnabled) {
-      console.log('[PG Memory] OmO integration not enabled, skipping OmO schema');
+      this.logger.info('OmO integration not enabled, skipping OmO schema');
       return;
     }
 
-    console.log('[PG Memory] Initializing OmO schema...');
+    this.logger.info('Initializing OmO schema...');
 
     // 1. 添加 source_agent 字段到相关表
     const tablesWithAgent = ['observations', 'semantic_cache', 'entities', 'reflections'];
@@ -525,7 +527,7 @@ export class DatabaseInitializer {
           CREATE INDEX IF NOT EXISTS idx_${table}_agent_task ON ${table}(agent_task_id)
         `);
       } catch (error) {
-        console.warn(`[PG Memory] Schema update warning for ${table}:`, error);
+        this.logger.warn(`Schema update warning for ${table}:`, error);
       }
     }
 
@@ -573,14 +575,14 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_omo_wisdom_type ON omo_wisdom(type)
     `);
 
-    console.log('[PG Memory] OmO schema initialized');
+    this.logger.info('OmO schema initialized');
   }
 
   async close(): Promise<void> {
     if (this.pool) {
       await this.pool.end();
       this.pool = null;
-      console.log('[PG Memory] Database connection closed');
+      this.logger.info('Database connection closed');
     }
   }
 

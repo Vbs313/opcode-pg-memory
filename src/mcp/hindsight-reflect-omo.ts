@@ -6,7 +6,10 @@
  */
 
 import { Pool } from 'pg';
+import { createLogger } from '../services/logger';
 import { hindsightReflect, HindsightReflectInput, HindsightReflectOutput } from './hindsight-reflect';
+
+const logger = createLogger('hindsight-reflect-omo');
 
 export interface HindsightReflectOmOInput extends HindsightReflectInput {
   // OmO 特有字段
@@ -72,14 +75,14 @@ export async function hindsightReflectOmO(
   input: HindsightReflectOmOInput,
   pool: Pool
 ): Promise<HindsightReflectOmOOutput> {
-  console.log(`[hindsight_reflect_omo] Agent: ${input.agent_id}, Scope: ${input.reflection_scope || 'agent-only'}`);
+  logger.info(`Agent: ${input.agent_id}, Scope: ${input.reflection_scope || 'agent-only'}`);
 
   const startTime = Date.now();
 
   // 检查 OmO 超时
   const timeoutCheck = checkOmOTimeout(input);
   if (timeoutCheck.wouldTimeout) {
-    console.warn(`[hindsight_reflect_omo] Would exceed OmO timeout, queuing for later`);
+    logger.warn(`Would exceed OmO timeout, queuing for later`);
     await queueReflectionForLater(input, pool);
 
     return {
@@ -129,7 +132,7 @@ export async function hindsightReflectOmO(
     const completedBeforeTimeout = !timeoutCheck.deadline ||
       Date.now() < timeoutCheck.deadline.getTime();
 
-    console.log(`[hindsight_reflect_omo] Completed in ${processingTime}ms, wisdom synced: ${wisdomSynced}`);
+    logger.info(`Completed in ${processingTime}ms, wisdom synced: ${wisdomSynced}`);
 
     return {
       ...baseResult,
@@ -146,7 +149,7 @@ export async function hindsightReflectOmO(
     };
 
   } catch (error) {
-    console.error('[hindsight_reflect_omo] Error:', error);
+    logger.error('Error:', error);
 
     return {
       success: false,
@@ -347,7 +350,7 @@ async function syncToOmOWisdom(
 
     return { success: true, entries };
   } catch (error) {
-    console.error('[hindsight_reflect_omo] Failed to sync to OmO Wisdom:', error);
+    logger.error('Failed to sync to OmO Wisdom:', error);
     return { success: false, entries };
   }
 }

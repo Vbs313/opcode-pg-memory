@@ -1,5 +1,8 @@
 import { Pool } from 'pg';
+import { createLogger } from '../services/logger';
 import { getEmbeddingService, EmbeddingService } from '../utils/embedding';
+
+const logger = createLogger('recall-memory');
 
 // ============================================================
 // Interfaces (enhanced — backward compatible with old MCP handler)
@@ -131,7 +134,7 @@ export async function recallMemory(
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const startTime = Date.now();
 
-  console.log(`[PG Memory] recall_memory called: "${input.query.substring(0, 100)}..."`);
+  logger.info(`recall_memory called: "${input.query.substring(0, 100)}..."`);
 
   try {
     // ── Step 0: Resolve session ID ──
@@ -163,8 +166,8 @@ export async function recallMemory(
       if (fusionResult) {
         fusedEmbedding = fusionResult.fusedEmbedding;
         contextUsed = fusionResult.contextUsed;
-        console.log(
-          `[PG Memory] Topic fusion applied (topic: ${fusionResult.contextUsed.topic_segment_id.substring(0, 8)}...)`,
+        logger.info(
+          `Topic fusion applied (topic: ${fusionResult.contextUsed.topic_segment_id.substring(0, 8)}...)`,
         );
       }
     }
@@ -233,8 +236,8 @@ export async function recallMemory(
     });
 
     const retrievalTime = Date.now() - startTime;
-    console.log(
-      `[PG Memory] recall_memory completed: ${results.length} results in ${retrievalTime}ms`,
+    logger.info(
+      `recall_memory completed: ${results.length} results in ${retrievalTime}ms`,
     );
 
     return {
@@ -248,7 +251,7 @@ export async function recallMemory(
       session_id: sessionId,
     };
   } catch (error: any) {
-    console.error('[PG Memory] recall_memory error:', error);
+    logger.error('recall_memory error:', error);
     const retrievalTime = Date.now() - startTime;
     return {
       query: input.query,
@@ -310,8 +313,8 @@ async function resolveSessionId(
       'SELECT id, opencode_session_id FROM session_map ORDER BY last_active_at DESC LIMIT 1',
     );
     if (recent.rows.length > 0) {
-      console.log(
-        `[PG Memory] Auto-detected session: ${recent.rows[0].opencode_session_id}`,
+      logger.info(
+        `Auto-detected session: ${recent.rows[0].opencode_session_id}`,
       );
       return recent.rows[0].id;
     }
@@ -324,8 +327,8 @@ async function resolveSessionId(
     "SELECT id, external_id FROM sessions ORDER BY updated_at DESC NULLS LAST, created_at DESC LIMIT 1",
   );
   if (recentSession.rows.length > 0) {
-    console.log(
-      `[PG Memory] Auto-detected session (legacy): ${recentSession.rows[0].external_id}`,
+    logger.info(
+      `Auto-detected session (legacy): ${recentSession.rows[0].external_id}`,
     );
     return recentSession.rows[0].id;
   }
@@ -437,7 +440,7 @@ async function topicContextFusion(
     };
   } catch (err) {
     // topic_segments table may not exist — skip fusion gracefully
-    console.warn('[PG Memory] Topic context fusion skipped:', err);
+    logger.warn('Topic context fusion skipped:', err);
     return null;
   }
 }
@@ -495,7 +498,7 @@ async function parallelRetrieve(
           const r = await semanticSearch(queryEmbedding, sessionId, pool, filterSQL);
           results.set('semantic', r);
         } catch (err) {
-          console.warn('[PG Memory] Semantic search failed:', err);
+          logger.warn('Semantic search failed:', err);
           results.set('semantic', []);
         }
       })(),
@@ -509,7 +512,7 @@ async function parallelRetrieve(
           const r = await bm25Search(query, sessionId, pool, filterSQL);
           results.set('bm25', r);
         } catch (err) {
-          console.warn('[PG Memory] BM25 search failed:', err);
+          logger.warn('BM25 search failed:', err);
           results.set('bm25', []);
         }
       })(),
@@ -523,7 +526,7 @@ async function parallelRetrieve(
           const r = await graphTraversal(query, embeddingServiceFallback(query), sessionId, pool, filterSQL);
           results.set('graph', r);
         } catch (err) {
-          console.warn('[PG Memory] Graph traversal failed:', err);
+          logger.warn('Graph traversal failed:', err);
           results.set('graph', []);
         }
       })(),
@@ -537,7 +540,7 @@ async function parallelRetrieve(
           const r = await keywordSearch(query, sessionId, pool, filterSQL);
           results.set('keyword', r);
         } catch (err) {
-          console.warn('[PG Memory] Keyword search failed:', err);
+          logger.warn('Keyword search failed:', err);
           results.set('keyword', []);
         }
       })(),
@@ -634,7 +637,7 @@ async function semanticSearch(
       })),
     );
   } catch (err) {
-    console.warn('[PG Memory] Entity semantic search error:', err);
+    logger.warn('Entity semantic search error:', err);
   }
 
   // ── 2. Observations ──
@@ -672,7 +675,7 @@ async function semanticSearch(
       })),
     );
   } catch (err) {
-    console.warn('[PG Memory] Observation semantic search error:', err);
+    logger.warn('Observation semantic search error:', err);
   }
 
   // ── 3. Reflections ──
@@ -710,7 +713,7 @@ async function semanticSearch(
       })),
     );
   } catch (err) {
-    console.warn('[PG Memory] Reflection semantic search error:', err);
+    logger.warn('Reflection semantic search error:', err);
   }
 
   return facts;
@@ -770,7 +773,7 @@ async function bm25Search(
       })),
     );
   } catch (err) {
-    console.warn('[PG Memory] BM25 search failed (pg_trgm may not be installed):', err);
+    logger.warn('BM25 search failed (pg_trgm may not be installed):', err);
   }
 
   return facts;
@@ -851,7 +854,7 @@ async function graphTraversal(
       _timestamp: row.created_at,
     }));
   } catch (err) {
-    console.warn('[PG Memory] Graph traversal error:', err);
+    logger.warn('Graph traversal error:', err);
     return [];
   }
 }
@@ -902,7 +905,7 @@ async function keywordSearch(
       _timestamp: row.created_at,
     }));
   } catch (err) {
-    console.warn('[PG Memory] Keyword search error:', err);
+    logger.warn('Keyword search error:', err);
     return [];
   }
 }

@@ -6,7 +6,10 @@
  */
 
 import { Pool } from 'pg';
+import { createLogger } from '../services/logger';
 import { recallMemory, RecallMemoryInput, RecallMemoryOutput } from './recall-memory';
+
+const logger = createLogger('recall-memory-omo');
 
 export interface RecallMemoryOmOInput extends RecallMemoryInput {
   // OmO 特有字段
@@ -65,7 +68,7 @@ export async function recallMemoryOmO(
   input: RecallMemoryOmOInput,
   pool: Pool
 ): Promise<RecallMemoryOmOOutput> {
-  console.log(`[recall_memory_omo] Agent: ${input.agent_id}, Task: ${input.task_id || 'none'}`);
+  logger.info(`Agent: ${input.agent_id}, Task: ${input.task_id || 'none'}`);
 
   const startTime = Date.now();
 
@@ -119,7 +122,7 @@ export async function recallMemoryOmO(
 
     const retrievalTime = Date.now() - startTime;
 
-    console.log(`[recall_memory_omo] Retrieved ${finalResults.length} results in ${retrievalTime}ms`);
+    logger.info(`Retrieved ${finalResults.length} results in ${retrievalTime}ms`);
 
     return {
       query: input.query,
@@ -144,7 +147,7 @@ export async function recallMemoryOmO(
     };
 
   } catch (error) {
-    console.error('[recall_memory_omo] Error:', error);
+    logger.error('Error:', error);
     throw error;
   }
 }

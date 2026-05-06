@@ -6,6 +6,9 @@ import {
   ToolExecuteAfterOutput 
 } from '../types';
 import { stripPrivateContent } from '../services/privacy';
+import { createLogger } from '../services/logger';
+
+const logger = createLogger('tool-execute');
 
 export interface ToolExecuteHandlerConfig {
   maxInputSummaryLength: number;
@@ -37,17 +40,17 @@ export async function handleToolExecuteBefore(
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const { session, tool, messageId } = input;
   
-  console.log(`[PG Memory] Tool execute before: ${tool.name}`);
+  logger.info(`Tool execute before: ${tool.name}`);
   
   try {
     // 获取 session 内部 ID
     const sessionResult = await pool.query(
-      'SELECT id FROM sessions WHERE external_id = $1',
+      'SELECT id FROM session_map WHERE opencode_session_id = $1',
       [session.id]
     );
     
     if (sessionResult.rows.length === 0) {
-      console.warn(`[PG Memory] Session not found: ${session.id}`);
+      logger.warn(`Session not found: ${session.id}`);
       return;  // ✅ 返回 void 而非 {}
     }
     
@@ -81,11 +84,11 @@ export async function handleToolExecuteBefore(
       })
     ]);
     
-    console.log(`[PG Memory] Recorded tool input: ${tool.name}`);
+    logger.info(`Recorded tool input: ${tool.name}`);
     
     // ✅ 正确的钩子签名：不返回任何值（void）
   } catch (error) {
-    console.error('[PG Memory] Error handling tool.execute.before:', error);
+    logger.error('Error handling tool.execute.before:', error);
     // 出错时不阻断主流程
   }
 }
@@ -110,17 +113,17 @@ export async function handleToolExecuteAfter(
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const { session, tool, result, messageId, executionTimeMs } = input;
   
-  console.log(`[PG Memory] Tool execute after: ${tool.name}, success: ${result.success}`);
+  logger.info(`Tool execute after: ${tool.name}, success: ${result.success}`);
   
   try {
     // 获取 session 内部 ID
     const sessionResult = await pool.query(
-      'SELECT id FROM sessions WHERE external_id = $1',
+      'SELECT id FROM session_map WHERE opencode_session_id = $1',
       [session.id]
     );
     
     if (sessionResult.rows.length === 0) {
-      console.warn(`[PG Memory] Session not found: ${session.id}`);
+      logger.warn(`Session not found: ${session.id}`);
       return;  // ✅ 返回 void
     }
     
@@ -163,7 +166,7 @@ export async function handleToolExecuteAfter(
         observationId
       ]);
       
-      console.log(`[PG Memory] Updated observation: ${observationId}`);
+      logger.info(`Updated observation: ${observationId}`);
     } else {
       await pool.query(`
         INSERT INTO observations (
@@ -187,7 +190,7 @@ export async function handleToolExecuteAfter(
         })
       ]);
       
-      console.log(`[PG Memory] Created new observation for tool output`);
+      logger.info('Created new observation for tool output');
     }
     
     // 记录 token 使用（估算）
@@ -208,7 +211,7 @@ export async function handleToolExecuteAfter(
     
     // ✅ 正确的钩子签名：不返回任何值
   } catch (error) {
-    console.error('[PG Memory] Error handling tool.execute.after:', error);
+    logger.error('Error handling tool.execute.after:', error);
     // 出错时不阻断主流程
   }
 }

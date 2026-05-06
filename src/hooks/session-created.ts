@@ -12,6 +12,9 @@ import {
   formatReflection,
   estimateTokens 
 } from '../utils/token-budget';
+import { createLogger } from '../services/logger';
+
+const logger = createLogger('session-created');
 
 export interface SessionCreatedHandlerConfig {
   contextLimitRatio: number;
@@ -49,7 +52,7 @@ export async function handleSessionCreated(
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const { session } = input;
   
-  console.log(`[PG Memory] Session created: ${session.id}`);
+  logger.info(`Session created: ${session.id}`);
   
   try {
     // 1. 创建或更新 session 记录
@@ -65,7 +68,7 @@ export async function handleSessionCreated(
       }
     );
     
-    console.log(`[PG Memory] Token budget for injection: ${budget}`);
+    logger.info(`Token budget for injection: ${budget}`);
     
     // 3. 检索事实
     const facts = await retrieveFactsForInjection(
@@ -75,7 +78,7 @@ export async function handleSessionCreated(
       mergedConfig
     );
     
-    console.log(`[PG Memory] Retrieved ${facts.length} facts for injection`);
+    logger.info(`Retrieved ${facts.length} facts for injection`);
     
     // 4. 格式化输出 → 突变 output
     const memories = facts.map(f => f.content);
@@ -83,7 +86,7 @@ export async function handleSessionCreated(
     // ✅ 正确的钩子签名：mutate output.context
     output.context = { memories };
   } catch (error) {
-    console.error('[PG Memory] Error handling session.created:', error);
+    logger.error('Error handling session.created:', error);
     // 出错时不阻断主流程，output 保持为空对象
   }
 }

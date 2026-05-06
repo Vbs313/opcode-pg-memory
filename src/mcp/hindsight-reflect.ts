@@ -1,5 +1,8 @@
 import { Pool } from 'pg';
+import { createLogger } from '../services/logger';
 import type { Reflection } from '../types';
+
+const logger = createLogger('hindsight-reflect');
 
 // ============================================================
 // Public input / output interfaces
@@ -182,8 +185,8 @@ export async function hindsightReflect(
   const startTime = Date.now();
   let totalTokens = { input: 0, output: 0, total: 0 };
 
-  console.log(
-    `[PG Memory] hindsight_reflect called: session=${input.session_id || 'none'}, ` +
+  logger.info(
+    `hindsight_reflect called: session=${input.session_id || 'none'}, ` +
     `omo_task=${input.omo_task_id || 'none'}, ` +
     `topic_segment=${input.topic_segment_id || 'none'}, ` +
     `aggregate=${input.aggregate ?? false}`,
@@ -194,7 +197,7 @@ export async function hindsightReflect(
     const scope = await resolveScope(input, pool);
 
     if (!scope.observable) {
-      console.log('[PG Memory] hindsight_reflect: no observations available for scope');
+      logger.info('hindsight_reflect: no observations available for scope');
       return {
         generated_reflections: [],
         token_usage: totalTokens,
@@ -206,7 +209,7 @@ export async function hindsightReflect(
     const observations = await collectObservations(input, scope, mergedConfig, pool);
 
     if (observations.length === 0) {
-      console.log('[PG Memory] hindsight_reflect: zero observations collected');
+      logger.info('hindsight_reflect: zero observations collected');
       return {
         generated_reflections: [],
         token_usage: totalTokens,
@@ -214,13 +217,13 @@ export async function hindsightReflect(
       };
     }
 
-    console.log(`[PG Memory] Fetched ${observations.length} observations for reflection`);
+    logger.info(`Fetched ${observations.length} observations for reflection`);
 
     // ── Threshold check (skip if below threshold and not manual) ──────
     const threshold = mergedConfig.observationThreshold;
     if (observations.length < threshold && input.trigger_type !== 'manual') {
-      console.log(
-        `[PG Memory] hindsight_reflect: observation count (${observations.length}) ` +
+      logger.info(
+        `hindsight_reflect: observation count (${observations.length}) ` +
         `below threshold (${threshold}), skipping`,
       );
       return {
@@ -237,8 +240,8 @@ export async function hindsightReflect(
 
     const segments = groupObservationsBySegment(observations, shouldAggregate);
 
-    console.log(
-      `[PG Memory] Grouped into ${segments.length} segment(s) ` +
+    logger.info(
+      `Grouped into ${segments.length} segment(s) ` +
       `(aggregate=${shouldAggregate})`,
     );
 
@@ -265,8 +268,8 @@ export async function hindsightReflect(
     await updateReflectionTimestamp(scope, pool);
 
     const elapsed = Date.now() - startTime;
-    console.log(
-      `[PG Memory] hindsight_reflect completed: ` +
+    logger.info(
+      `hindsight_reflect completed: ` +
       `${generatedReflections.length} reflections in ${elapsed}ms`,
     );
 
@@ -277,7 +280,7 @@ export async function hindsightReflect(
     };
   } catch (error) {
     const elapsed = Date.now() - startTime;
-    console.error('[PG Memory] hindsight_reflect error:', error);
+    logger.error('hindsight_reflect error:', error);
 
     // Record error in reflection_errors table
     await logReflectionError(input, error, pool);
@@ -426,7 +429,7 @@ async function collectObservations(
     try {
       return await collectObservationsForSegment(scope.topicSegmentId, config, pool);
     } catch (err) {
-      console.warn('[PG Memory] New-schema segment collection failed, falling back:', err);
+      logger.warn('New-schema segment collection failed, falling back:', err);
     }
   }
 
@@ -435,7 +438,7 @@ async function collectObservations(
     try {
       return await collectObservationsForOmoTask(scope.omoTaskId, config, pool);
     } catch (err) {
-      console.warn('[PG Memory] New-schema omo_task collection failed, falling back:', err);
+      logger.warn('New-schema omo_task collection failed, falling back:', err);
     }
   }
 
@@ -444,7 +447,7 @@ async function collectObservations(
     try {
       return await collectObservationsForSessionMaps(scope.sessionMapIds, config, pool);
     } catch (err) {
-      console.warn('[PG Memory] New-schema session_map collection failed, falling back:', err);
+      logger.warn('New-schema session_map collection failed, falling back:', err);
     }
   }
 
@@ -750,8 +753,8 @@ async function performReflectionWithLLM(
   config: HindsightReflectConfig,
   prompt?: string,
 ): Promise<LLMReflectionResult> {
-  console.log(
-    `[PG Memory] Performing reflection with ${config.modelSize} model ` +
+  logger.info(
+    `Performing reflection with ${config.modelSize} model ` +
     `on ${observations.length} observations (topic: ${topicSummary})`,
   );
 
@@ -949,7 +952,7 @@ async function storeReflection(
         );
       } catch {
         // New columns may not exist yet — fall through to legacy INSERT
-        console.warn('[PG Memory] New schema INSERT failed, falling back to legacy');
+        logger.warn('New schema INSERT failed, falling back to legacy');
       }
     }
 
@@ -973,7 +976,7 @@ async function storeReflection(
     }
 
     if (!insertResult) {
-      console.warn('[PG Memory] No valid session reference to store reflection');
+      logger.warn('No valid session reference to store reflection');
       return null;
     }
 
@@ -989,7 +992,7 @@ async function storeReflection(
       metadata,
     };
   } catch (error) {
-    console.error('[PG Memory] Failed to store reflection:', error);
+    logger.error('Failed to store reflection:', error);
     return null;
   }
 }
@@ -1040,7 +1043,7 @@ async function updateReflectionTimestamp(
       );
     }
   } catch (error) {
-    console.warn('[PG Memory] Failed to update reflection timestamp:', error);
+    logger.warn('Failed to update reflection timestamp:', error);
   }
 }
 
@@ -1077,7 +1080,7 @@ async function logReflectionError(
       [sessionId, errorMessage, errorStack, 0, 0],
     );
   } catch (logError) {
-    console.error('[PG Memory] Failed to log reflection error:', logError);
+    logger.error('Failed to log reflection error:', logError);
   }
 }
 

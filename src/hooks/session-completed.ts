@@ -1,5 +1,8 @@
 import { Pool } from 'pg';
 import { SessionCompletedInput, SessionCompletedOutput } from '../types';
+import { createLogger } from '../services/logger';
+
+const logger = createLogger('session-completed');
 
 export interface SessionCompletedHandlerConfig {
   reflectionThreshold: number;
@@ -37,17 +40,17 @@ export async function handleSessionCompleted(
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const { session, summary } = input;
   
-  console.log(`[PG Memory] Session completed: ${session.id}, messages: ${session.messageCount}, duration: ${session.durationMs}ms`);
+  logger.info(`Session completed: ${session.id}, messages: ${session.messageCount}, duration: ${session.durationMs}ms`);
   
   try {
     // 获取 session 内部 ID
     const sessionResult = await pool.query(
-      'SELECT id, reflection_last_at FROM sessions WHERE external_id = $1',
+      'SELECT id, reflection_last_at FROM session_map WHERE opencode_session_id = $1',
       [session.id]
     );
     
     if (sessionResult.rows.length === 0) {
-      console.warn(`[PG Memory] Session not found: ${session.id}`);
+      logger.warn(`Session not found: ${session.id}`);
       return;  // ✅ 返回 void
     }
     
@@ -61,7 +64,7 @@ export async function handleSessionCompleted(
       pool
     );
     
-    console.log(`[PG Memory] Observations since last reflection: ${observationStats.countSinceLastReflection}`);
+    logger.info(`Observations since last reflection: ${observationStats.countSinceLastReflection}`);
     
     // 2. 检查是否应该触发反思
     const shouldReflect = await checkShouldTriggerReflection(
@@ -84,7 +87,7 @@ export async function handleSessionCompleted(
     
     // 4. 记录会话完成
     await pool.query(`
-      UPDATE sessions 
+      UPDATE session_map 
       SET updated_at = NOW(),
           metadata = metadata || $1
       WHERE id = $2
@@ -113,11 +116,11 @@ export async function handleSessionCompleted(
       })
     ]);
     
-    console.log(`[PG Memory] Session completion processed: ${session.id}`);
+    logger.info(`Session completion processed: ${session.id}`);
     
     // ✅ 正确的钩子签名：不返回任何值
   } catch (error) {
-    console.error('[PG Memory] Error handling session.completed:', error);
+    logger.error('Error handling session.completed:', error);
     // 出错时不阻断主流程
   }
 }
@@ -170,7 +173,7 @@ async function checkShouldTriggerReflection(
     Math.random() * (config.maxObservationThreshold - config.minObservationThreshold + 1)
   ) + config.minObservationThreshold;
   
-  console.log(`[PG Memory] Reflection threshold: ${threshold}, current: ${observationCount}`);
+  logger.info(`Reflection threshold: ${threshold}, current: ${observationCount}`);
   
   if (observationCount < threshold) {
     return false;
@@ -186,7 +189,7 @@ async function checkShouldTriggerReflection(
   const pendingCount = parseInt(pendingResult.rows[0].count, 10);
   
   if (pendingCount > 0) {
-    console.log(`[PG Memory] Reflection already in progress for session: ${sessionId}`);
+    logger.info(`Reflection already in progress for session: ${sessionId}`);
     return false;
   }
   
@@ -206,7 +209,7 @@ async function scheduleReflectionTask(
   const currentHour = new Date().getHours();
   const isOffPeak = config.offPeakHours.includes(currentHour);
   
-  console.log(`[PG Memory] Scheduling reflection task for session: ${externalSessionId}, off-peak: ${isOffPeak}`);
+  logger.info(`Scheduling reflection task for session: ${externalSessionId}, off-peak: ${isOffPeak}`);
   
   if (isOffPeak) {
     // 低峰期：立即执行
@@ -226,7 +229,7 @@ async function executeReflection(
   observationCount: number,
   pool: Pool
 ): Promise<void> {
-  console.log(`[PG Memory] Executing reflection for session: ${externalSessionId}`);
+  logger.info(`Executing reflection for session: ${externalSessionId}`);
   
   try {
     // 1. 获取待反思的观察记录
@@ -240,7 +243,7 @@ async function executeReflection(
     `, [sessionId]);
     
     if (observations.rows.length === 0) {
-      console.log(`[PG Memory] No observations to reflect on for session: ${externalSessionId}`);
+      logger.info(`No observations to reflect on for session: ${externalSessionId}`);
       return;
     }
     
@@ -272,15 +275,15 @@ async function executeReflection(
     
     // 4. 更新会话的 reflection_last_at
     await pool.query(`
-      UPDATE sessions 
+      UPDATE session_map 
       SET reflection_last_at = NOW()
       WHERE id = $1
     `, [sessionId]);
     
-    console.log(`[PG Memory] Reflection completed for session: ${externalSessionId}, patterns: ${reflectionResult.patterns.length}`);
+    logger.info(`Reflection completed for session: ${externalSessionId}, patterns: ${reflectionResult.patterns.length}`);
     
   } catch (error) {
-    console.error(`[PG Memory] Reflection failed for session: ${externalSessionId}`, error);
+    logger.error(`Reflection failed for session: ${externalSessionId}`, error);
     
     // 记录反思错误
     await pool.query(`
@@ -387,11 +390,11 @@ async function queueReflectionForOffPeak(
   observationCount: number,
   pool: Pool
 ): Promise<void> {
-  console.log(`[PG Memory] Queued reflection for off-peak execution: ${externalSessionId}`);
+  logger.info(`Queued reflection for off-peak execution: ${externalSessionId}`);
   
   // 存储队列信息到 metadata
   await pool.query(`
-    UPDATE sessions 
+    UPDATE session_map 
     SET metadata = metadata || $1
     WHERE id = $2
   `, [
@@ -419,10 +422,10 @@ export async function getPendingReflections(
   const result = await pool.query(`
     SELECT 
       s.id as session_id,
-      s.external_id as external_session_id,
+      s.opencode_session_id as external_session_id,
       (s.metadata->'pendingReflection'->>'observationCount')::int as observation_count,
       (s.metadata->'pendingReflection'->>'queuedAt')::timestamptz as queued_at
-    FROM sessions s
+    FROM session_map s
     WHERE s.metadata->'pendingReflection' IS NOT NULL
       AND s.reflection_last_at < (s.metadata->'pendingReflection'->>'queuedAt')::timestamptz
        OR s.reflection_last_at IS NULL
@@ -452,7 +455,7 @@ export async function retryFailedReflections(
   `, [maxRetries]);
   
   for (const error of failedReflections.rows) {
-    console.log(`[PG Memory] Retrying reflection for session: ${error.session_id}`);
+    logger.info(`Retrying reflection for session: ${error.session_id}`);
     
     // 增加重试计数
     await pool.query(`
@@ -463,14 +466,14 @@ export async function retryFailedReflections(
     
     // 重新执行反思
     const sessionResult = await pool.query(
-      'SELECT external_id FROM sessions WHERE id = $1',
+      'SELECT opencode_session_id FROM session_map WHERE id = $1',
       [error.session_id]
     );
     
     if (sessionResult.rows.length > 0) {
       await executeReflection(
         error.session_id,
-        sessionResult.rows[0].external_id,
+        sessionResult.rows[0].opencode_session_id,
         error.observation_count,
         pool
       );
