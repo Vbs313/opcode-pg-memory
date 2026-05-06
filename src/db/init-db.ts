@@ -83,10 +83,13 @@ export class DatabaseInitializer {
       // 3. 创建表
       await this.createTables(client);
 
-      // 4. 创建索引
+      // 4. 迁移旧列名（session_id → session_map_id）
+      await this.migrateLegacyColumnNames(client);
+
+      // 5. 创建索引
       await this.createIndexes(client);
 
-      // 5. 迁移旧 sessions 数据到 session_map
+      // 6. 迁移旧 sessions 数据到 session_map
       await this.migrateSessionsData(client);
 
       // 6. 初始化 OmO 适配 Schema（如果启用）
@@ -415,6 +418,43 @@ export class DatabaseInitializer {
     `);
 
     console.log('[PG Memory] Indexes created');
+  }
+
+  /**
+   * 迁移旧列名 session_id → session_map_id
+   * 
+   * 兼容从 v1.x 升级的场景：旧 schema 中 entities/observations 等子表
+   * 使用 session_id 列名，但新 schema 使用 session_map_id。
+   * 重命名是 PostgreSQL 元数据操作，不重写数据行，FK 关联自动继承新列名。
+   */
+  private async migrateLegacyColumnNames(client: PoolClient): Promise<void> {
+    const tables = ['entities', 'observations', 'relations', 'reflections',
+      'semantic_cache', 'token_usage_log', 'reflection_errors'];
+
+    for (const table of tables) {
+      try {
+        // 检查表是否存在且包含旧列名 session_id 但不含 session_map_id
+        const hasOld = await client.query(`
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'session_id'
+        `, [table]);
+        const hasNew = await client.query(`
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'session_map_id'
+        `, [table]);
+
+        if (hasOld.rows.length > 0 && hasNew.rows.length === 0) {
+          await client.query(`
+            ALTER TABLE "${table}" RENAME COLUMN session_id TO session_map_id
+          `);
+          console.log(`[PG Memory] Renamed ${table}.session_id → session_map_id`);
+        }
+      } catch (err) {
+        // 某些表可能没有旧列名（新安装），静默跳过
+        console.log(`[PG Memory] Skipped column rename for ${table}: ${err}`);
+      }
+    }
+    console.log('[PG Memory] Legacy column migration complete');
   }
 
   /**
