@@ -54,10 +54,14 @@ Set-Location $PluginDir
 
 if (-not $SkipBuild) {
     Write-Host "`nInstalling dependencies..." -ForegroundColor Cyan
-    bun install --frozen-lockfile 2>&1 | Out-Null
+    $installOutput = bun install --frozen-lockfile 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  Lockfile mismatch, running bun install..." -ForegroundColor Yellow
-        bun install
+        bun install 2>&1 | Out-String
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [!!] bun install failed" -ForegroundColor Red
+        exit 1
     }
     Write-Host "[OK] Dependencies installed" -ForegroundColor Green
 

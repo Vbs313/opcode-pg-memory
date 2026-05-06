@@ -5,6 +5,7 @@ import {
   ToolExecuteAfterInput,
   ToolExecuteAfterOutput 
 } from '../types';
+import { stripPrivateContent } from '../services/privacy';
 
 export interface ToolExecuteHandlerConfig {
   maxInputSummaryLength: number;
@@ -226,6 +227,9 @@ function summarizeToolInput(
     // 生成摘要
     let summary = JSON.stringify(sanitized);
     
+    // 移除 <private> 标记内容
+    summary = stripPrivateContent(summary);
+    
     if (summary.length > maxLength) {
       summary = summary.substring(0, maxLength) + '... [truncated]';
     }
@@ -255,6 +259,9 @@ function summarizeToolOutput(
     } else {
       summary = JSON.stringify(result.data);
     }
+    
+    // 移除 <private> 标记内容
+    summary = stripPrivateContent(summary);
     
     if (summary.length > maxLength) {
       summary = summary.substring(0, maxLength) + '... [truncated]';

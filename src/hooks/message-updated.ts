@@ -6,6 +6,7 @@ import {
   OpenCodeMessage
 } from '../types';
 import { estimateTokens } from '../utils/token-budget';
+import { stripPrivateContent } from '../services/privacy';
 
 export interface MessageUpdatedHandlerConfig {
   minConfidence: number;
@@ -226,8 +227,11 @@ async function extractEntities(
 ): Promise<Array<{ id: string; name: string; type: string }>> {
   const entities: Array<{ id: string; name: string; type: string }> = [];
   
+  // 移除 <private> 标记内容后再进行实体提取
+  const sanitizedContent = stripPrivateContent(content);
+  
   // 基于规则的实体提取（简化版）
-  const extractedNames = heuristicEntityExtraction(content);
+  const extractedNames = heuristicEntityExtraction(sanitizedContent);
   
   for (const extracted of extractedNames.slice(0, config.maxEntitiesPerMessage)) {
     if (extracted.name.length < config.minEntityNameLength) {

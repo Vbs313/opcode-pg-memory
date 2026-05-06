@@ -9,7 +9,10 @@ import { handleSessionCompleted } from './hooks/session-completed';
 import { recallMemory, RecallMemoryInput } from './mcp/recall-memory';
 import { hindsightReflect } from './mcp/hindsight-reflect';
 import { createCacheManager, SemanticCacheManager } from './cache/semantic-cache';
-import { PluginConfig, HindsightReflectInput } from './types';
+import { createLogger } from './services/logger';
+import { PluginConfig, HindsightReflectInput, RetrievedFact } from './types';
+import { calculateTokenBudget } from './utils/token-budget';
+import { detectMemoryKeyword, MEMORY_NUDGE_MESSAGE } from './services/keyword';
 
 // ============================================================================
 // Plugin Type Definitions (matches official OpenCode Plugin API)
@@ -215,6 +218,10 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
 
   const pool = plugin.getPool();
   const cacheManager = plugin.getCacheManager();
+  const logger = createLogger('plugin');
+
+  // Track sessions that have received memory injection
+  const injectedSessions = new Set<string>();
 
   // ==========================================================================
   // Return hooks object
@@ -284,6 +291,33 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
                   }
                 } catch (err) {
                   console.warn('[PG Memory] Failed to mark cache pruned:', err);
+                }
+              }
+
+              // Save compaction summary as reflection
+              const summaryText = properties.summary || properties.compactionSummary;
+              if (summaryText && String(summaryText).length >= 100) {
+                try {
+                  const sessionResult = await pool.query(
+                    'SELECT id FROM sessions WHERE external_id = $1',
+                    [sid]
+                  );
+                  if (sessionResult.rows.length > 0) {
+                    await pool.query(`
+                      INSERT INTO reflections (session_id, summary, source_observation_ids, confidence, pattern_type, metadata)
+                      VALUES ($1, $2, $3, $4, $5, $6)
+                    `, [
+                      sessionResult.rows[0].id,
+                      `[Session Summary] ${String(summaryText)}`,
+                      properties.messageIds || [],
+                      0.8,
+                      'session_summary',
+                      JSON.stringify({ savedAt: new Date().toISOString() }),
+                    ]);
+                    logger.info('Saved session summary as reflection', { sessionID: sid });
+                  }
+                } catch (err) {
+                  logger.warn('Failed to save session summary', err);
                 }
               }
             }
@@ -398,6 +432,74 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
     },
 
     // -----------------------------------------------------------------------
+    // chat.message - inject relevant memories on first message
+    // -----------------------------------------------------------------------
+    'chat.message': async (
+      input: { sessionID: string; agent?: string; model?: { providerID: string; modelID: string }; messageID?: string; variant?: string },
+      output: { message: any; parts: any[] }
+    ) => {
+      try {
+        // Only inject on the first message of a session
+        if (!injectedSessions.has(input.sessionID)) {
+          injectedSessions.add(input.sessionID);
+
+          logger.info('First message in session', { sessionID: input.sessionID });
+
+          // Retrieve relevant facts for this session
+          const contextLimit = 128000; // default model context limit
+          const budget = calculateTokenBudget(contextLimit, config.tokenBudget || {});
+          const facts = await retrieveFactsForInjection(
+            input.sessionID,
+            { maxTokens: typeof budget === 'number' ? budget : 2000 },
+            pool,
+            { minConfidence: 0.5, minWeight: 0.3 }
+          );
+
+          if (facts.length > 0) {
+            // Format as context block
+            const contextBlock = formatMemoryContext(facts);
+
+            // Inject as synthetic part (visible to LLM, hidden in TUI)
+            if (output.parts && Array.isArray(output.parts)) {
+              output.parts.unshift({
+                id: `prt_pgmemory-context-${Date.now()}`,
+                sessionID: input.sessionID,
+                messageID: output.message?.id || input.messageID || '',
+                type: 'text',
+                text: contextBlock,
+                synthetic: true,
+              });
+              logger.info(`Injected ${facts.length} memories`, { sessionID: input.sessionID });
+            }
+          } else {
+            logger.debug('No memories to inject');
+          }
+        }
+
+        // Check for memory keywords AFTER first-message injection
+        const userText = output.parts
+          .filter((p: any) => p.type === 'text' && !p.synthetic)
+          .map((p: any) => p.text || '')
+          .join(' ');
+
+        if (detectMemoryKeyword(userText)) {
+          logger.info('Memory keyword detected', { sessionID: input.sessionID });
+          output.parts.push({
+            id: `prt_pgmemory-nudge-${Date.now()}`,
+            sessionID: input.sessionID,
+            messageID: output.message?.id || input.messageID || '',
+            type: 'text',
+            text: MEMORY_NUDGE_MESSAGE,
+            synthetic: true,
+          });
+        }
+      } catch (error) {
+        logger.error('Failed to inject memories in chat.message', error);
+        // Non-blocking: never crash the message flow
+      }
+    },
+
+    // -----------------------------------------------------------------------
     // tool.execute.before - intercept before tool execution
     // -----------------------------------------------------------------------
     'tool.execute.before': async (
@@ -457,6 +559,18 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
       output: { context: string[]; prompt?: string }
     ) => {
       try {
+        // Show compaction notification
+        if (ctx.client?.tui?.showToast) {
+          ctx.client.tui.showToast({
+            body: {
+              title: 'PG Memory Compaction',
+              message: 'Compacting with pg-memory context...',
+              variant: 'warning',
+              duration: 3000,
+            },
+          }).catch(() => {});
+        }
+
         await handleSessionCompacting(
           {
             session: { id: input.sessionID },
@@ -466,6 +580,20 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
           { preserveMessageIds: [] },
           pool
         );
+
+        // Show success toast
+        if (ctx.client?.tui?.showToast) {
+          setTimeout(() => {
+            ctx.client.tui.showToast({
+              body: {
+                title: 'Compaction Complete',
+                message: 'PG Memory preserved high-value observations',
+                variant: 'success',
+                duration: 2000,
+              },
+            }).catch(() => {});
+          }, 500);
+        }
       } catch (error) {
         console.error('[PG Memory] Error in experimental.session.compacting:', error);
       }
@@ -660,6 +788,76 @@ function normalizeSessionData(data: any): {
     },
     messages: data.messages || [],
   };
+}
+
+// ============================================================================
+// Chat Message Helpers
+// ============================================================================
+
+/**
+ * Format memory facts into a context block for LLM consumption.
+ */
+function formatMemoryContext(facts: RetrievedFact[]): string {
+  if (facts.length === 0) return '';
+  const lines = ['[PG MEMORY]', 'Relevant context from previous sessions:', ''];
+  for (const f of facts) {
+    const typeLabel = f.type === 'reflection' ? 'REFLECTION'
+      : f.type === 'observation' ? 'OBSERVATION'
+      : f.type === 'entity' ? 'ENTITY'
+      : f.type.toUpperCase();
+    const tierLabel = f.tier ? ` [${f.tier}]` : '';
+    const score = f.relevanceScore ? ` (${(f.relevanceScore * 100).toFixed(0)}%)` : '';
+    lines.push(`- [${typeLabel}${tierLabel}] ${f.content.substring(0, 200)}${score}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Simplified inline memory retrieval for chat.message injection.
+ * Queries entities with high weight directly from PG.
+ */
+async function retrieveFactsForInjection(
+  sessionId: string,
+  budget: { maxTokens: number },
+  pool: any,
+  config?: { minConfidence?: number; minWeight?: number }
+): Promise<RetrievedFact[]> {
+  const facts: RetrievedFact[] = [];
+  const maxTokens = budget.maxTokens || 2000;
+  let usedTokens = 0;
+
+  try {
+    const { rows } = await pool.query(`
+      SELECT name, type, tier, weight, description, confidence,
+             EXTRACT(EPOCH FROM (NOW() - last_seen_at)) / 86400.0 AS days_ago
+      FROM entities
+      WHERE weight >= $1 AND confidence >= $2
+      ORDER BY tier = 'permanent' DESC, tier = 'project' DESC, weight DESC
+      LIMIT 20
+    `, [config?.minWeight || 0.5, config?.minConfidence || 0.5]);
+
+    for (const row of rows) {
+      const content = row.description
+        ? `${row.name}: ${row.description.substring(0, 150)}`
+        : `${row.name} (${row.type})`;
+      const tokens = Math.ceil(content.length / 4);
+      if (usedTokens + tokens > maxTokens) break;
+      usedTokens += tokens;
+      const recency = Math.max(0, 1 - (row.days_ago || 0) / 90);
+      facts.push({
+        type: 'entity',
+        content,
+        tier: row.tier,
+        tokens,
+        relevanceScore: (row.weight / 10) * 0.6 + recency * 0.4,
+        metadata: { entityName: row.name, entityType: row.type, tier: row.tier },
+      });
+    }
+  } catch (err) {
+    // Non-blocking fallback - return empty
+  }
+
+  return facts;
 }
 
 // ============================================================================
