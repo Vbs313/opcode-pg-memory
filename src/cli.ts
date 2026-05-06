@@ -137,12 +137,35 @@ function createSyncCommand(): boolean {
   return true;
 }
 
+const PG_MEMORY_REFLECT_COMMAND = `---
+description: Reflect on current session to extract patterns and insights
+---
+
+# PG Memory Reflect
+
+Summarize and reflect on the current session to extract reusable patterns, lessons, and insights.
+
+## Instructions
+
+1. Determine the current session ID
+2. Call the \`hindsight_reflect\` MCP tool with the session ID
+3. Present the results in a clear format: error patterns, tool usage, success patterns, recommendations
+`;
+
+function createReflectCommand(): boolean {
+  mkdirSync(OPENCODE_COMMAND_DIR, { recursive: true });
+  const reflectPath = join(OPENCODE_COMMAND_DIR, "pg-memory-reflect.md");
+  writeFileSync(reflectPath, PG_MEMORY_REFLECT_COMMAND);
+  console.log("Created /pg-memory-reflect command");
+  return true;
+}
+
 function printHelp(): void {
   console.log(`
 pg-memory - PostgreSQL-backed long-term memory for OpenCode
 
 Commands:
-  install    Register plugin and create /pg-memory-init command
+  install    Register plugin and create commands
   sync       Sync OpenCode sessions from SQLite to PostgreSQL
 
 Examples:
@@ -182,6 +205,7 @@ if (cmd === "install") {
   }
   createInitCommand();
   createSyncCommand();
+  createReflectCommand();
   console.log("\nSetup complete!");
   console.log("\nNext steps:");
   console.log(`  1. cd ${process.cwd()}`);
