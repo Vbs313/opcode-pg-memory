@@ -189,6 +189,32 @@ function createSkill(): boolean {
   return true;
 }
 
+const PG_MEMORY_AGENTS_TEMPLATE = `# PG Memory — Long-term Memory System
+
+本项目已安装 pg-memory 插件。你有以下记忆工具可用：
+
+## 自动功能（无需你调用）
+- 工具执行记录 — 每次工具调用自动保存为观察
+- 实体提取 — 从代码中自动提取函数、类、文件等实体
+- 话题段隔离 — 话题切换时自动分段
+- 首条消息注入 — 新会话自动注入历史相关记忆
+
+## 手动工具
+- recall_memory({ query: "你的任务目标" }) — 处理新任务前检索历史经验
+- /pg-memory-reflect — 完成重要工作后总结模式
+
+## OmO 子代理策略
+OmO 子代理无 MCP 直接访问。主代理应先调用 recall_memory 再将结果传给子代理。
+`;
+
+function createAgentsTemplate(): boolean {
+  mkdirSync(OPENCODE_SKILLS_DIR, { recursive: true });
+  const agentsPath = join(OPENCODE_SKILLS_DIR, "pg-memory-agents.template.md");
+  writeFileSync(agentsPath, PG_MEMORY_AGENTS_TEMPLATE);
+  console.log("Created AGENTS.md template (copy to project root)");
+  return true;
+}
+
 function printHelp(): void {
   console.log(`
 pg-memory - PostgreSQL-backed long-term memory for OpenCode
@@ -236,6 +262,7 @@ if (cmd === "install") {
   createSyncCommand();
   createReflectCommand();
   createSkill();
+  createAgentsTemplate();
   console.log("\nSetup complete!");
   console.log("\nNext steps:");
   console.log(`  1. cd ${process.cwd()}`);
