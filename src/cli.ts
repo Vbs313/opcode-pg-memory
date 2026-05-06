@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, copyFileSync, readdirSync, statSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
@@ -8,6 +8,7 @@ const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
 const OPENCODE_SKILLS_DIR = join(homedir(), ".config", "opencode", "skills");
 const PLUGIN_NAME = "opcode-pg-memory";
 const REPO_URL = "https://github.com/Vbs313/opcode-pg-memory";
+const OPENCODE_CACHE_DIR = join(homedir(), ".cache", "opencode", "packages", "opcode-pg-memory@latest");
 
 const PG_MEMORY_INIT_COMMAND = `---
 description: Initialize pg-memory with codebase knowledge
@@ -248,6 +249,53 @@ if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
   process.exit(0);
 }
 
+function populateOpencodeCache(): boolean {
+  // When running via `bunx opcode-pg-memory`, __dirname is inside the npm tgz
+  // Copy dist/ files to OpenCode's package cache so the plugin loads from npm name
+  const cacheDist = join(OPENCODE_CACHE_DIR, "dist");
+  const sourceDist = join(__dirname, "..", "dist");
+
+  if (!existsSync(sourceDist)) {
+    console.log("  dist/ not found at", sourceDist, "- plugin not running from npm package, skipping cache");
+    return false;
+  }
+
+  if (!existsSync(cacheDist)) {
+    mkdirSync(cacheDist, { recursive: true });
+  }
+
+  function copyDir(src: string, dest: string) {
+    mkdirSync(dest, { recursive: true });
+    for (const entry of readdirSync(src)) {
+      const srcPath = join(src, entry);
+      const destPath = join(dest, entry);
+      if (statSync(srcPath).isDirectory()) {
+        copyDir(srcPath, destPath);
+      } else {
+        copyFileSync(srcPath, destPath);
+      }
+    }
+  }
+
+  copyDir(sourceDist, cacheDist);
+  console.log(`  Populated OpenCode cache: ${cacheDist}`);
+
+  // Also copy config files needed by the cache
+  const cacheDir = OPENCODE_CACHE_DIR;
+  const sourceFiles = [".env.example", "README.md", "LICENSE", "scripts/migration-v2.sql", "package.json"];
+  for (const file of sourceFiles) {
+    const srcFile = join(__dirname, "..", file);
+    const destFile = join(cacheDir, file);
+    const destDir = dirname(destFile);
+    if (existsSync(srcFile)) {
+      mkdirSync(destDir, { recursive: true });
+      copyFileSync(srcFile, destFile);
+    }
+  }
+
+  return true;
+}
+
 if (cmd === "install") {
   console.log("\nOpenCode PG Memory installer\n");
   const configPath = findOpencodeConfig();
@@ -263,6 +311,7 @@ if (cmd === "install") {
   createReflectCommand();
   createSkill();
   createAgentsTemplate();
+  populateOpencodeCache();
   console.log("\nSetup complete!");
   console.log("\nNext steps:");
   console.log(`  1. cd ${process.cwd()}`);
