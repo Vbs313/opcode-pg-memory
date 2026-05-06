@@ -27,7 +27,8 @@
   },
   "include": [
     "src/**/*",
-    "mcp-server.ts"
+    "mcp-server.ts",
+    "index.ts"
   ],
   "exclude": [
     "node_modules",
