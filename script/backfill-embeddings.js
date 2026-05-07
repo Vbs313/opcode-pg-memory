@@ -6,10 +6,10 @@
  * at src/mcp/backfill-embeddings.ts, which feeds the AsyncEmbedder queue.
  *
  * Usage:
- *   node scripts/backfill-embeddings.js                          # full backfill
- *   node scripts/backfill-embeddings.js --limit 100               # quick test
- *   node scripts/backfill-embeddings.js --dry-run                 # count only
- *   node scripts/backfill-embeddings.js --limit 10 --json         # JSON summary
+ *   node script/backfill-embeddings.js                          # full backfill
+ *   node script/backfill-embeddings.js --limit 100               # quick test
+ *   node script/backfill-embeddings.js --dry-run                 # count only
+ *   node script/backfill-embeddings.js --limit 10 --json         # JSON summary
  *
  * Env: PG_PASSWORD (default: 123456)
  *
@@ -18,9 +18,9 @@
  *   - Ollama cooldown/retry handled by AsyncEmbedder automatically
  *   - Embedding model config via EMBEDDING_PROVIDER / EMBEDDING_MODEL / EMBEDDING_DIMENSIONS
  */
-const { Pool } = require('pg');
-const { backfillEmbeddings } = require('../dist/src/mcp/backfill-embeddings');
-const { initAsyncEmbedder } = require('../dist/src/services/async-embedder');
+const { Pool } = require("pg");
+const { backfillEmbeddings } = require("../dist/src/mcp/backfill-embeddings");
+const { initAsyncEmbedder } = require("../dist/src/services/async-embedder");
 
 // ── Argument parsing ──
 function parseArgs() {
@@ -28,9 +28,15 @@ function parseArgs() {
   const opts = { limit: 0, dryRun: false, json: false };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case '--limit': opts.limit = parseInt(args[++i], 10) || 0; break;
-      case '--dry-run': opts.dryRun = true; break;
-      case '--json': opts.json = true; break;
+      case "--limit":
+        opts.limit = parseInt(args[++i], 10) || 0;
+        break;
+      case "--dry-run":
+        opts.dryRun = true;
+        break;
+      case "--json":
+        opts.json = true;
+        break;
     }
   }
   return opts;
@@ -41,14 +47,17 @@ async function main() {
   const opts = parseArgs();
 
   const pool = new Pool({
-    host: 'localhost', port: 5432, database: 'PGOMO',
-    user: 'opencode', password: process.env.PG_PASSWORD || '123456',
+    host: "localhost",
+    port: 5432,
+    database: "PGOMO",
+    user: "opencode",
+    password: process.env.PG_PASSWORD || "123456",
   });
 
   try {
     // Check pending count
     const countResult = await pool.query(
-      'SELECT count(*)::int AS cnt FROM observations WHERE importance >= 3 AND embedding IS NULL'
+      "SELECT count(*)::int AS cnt FROM observations WHERE importance >= 3 AND embedding IS NULL",
     );
     const pending = countResult.rows[0]?.cnt || 0;
 
@@ -56,16 +65,24 @@ async function main() {
       if (opts.json) {
         console.log(JSON.stringify({ pending, limit: opts.limit || null }));
       } else {
-        console.log(`Pending observations to backfill: ${pending}${opts.limit ? ` (limit: ${opts.limit})` : ''}`);
+        console.log(
+          `Pending observations to backfill: ${pending}${opts.limit ? ` (limit: ${opts.limit})` : ""}`,
+        );
       }
       return;
     }
 
     if (pending === 0) {
       if (opts.json) {
-        console.log(JSON.stringify({ enqueued: 0, pending: 0, note: 'All observations already have embeddings.' }));
+        console.log(
+          JSON.stringify({
+            enqueued: 0,
+            pending: 0,
+            note: "All observations already have embeddings.",
+          }),
+        );
       } else {
-        console.log('All observations already have embeddings.');
+        console.log("All observations already have embeddings.");
       }
       return;
     }
@@ -93,7 +110,7 @@ async function main() {
   }
 }
 
-main().catch(e => {
-  console.error('FATAL:', e.message);
+main().catch((e) => {
+  console.error("FATAL:", e.message);
   process.exit(1);
 });

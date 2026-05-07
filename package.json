@@ -40,7 +40,7 @@
   },
   "files": [
     "dist",
-    "scripts/migration-v2.sql",
+    "script/migration-v2.sql",
     ".env.example",
     "README.md"
   ],

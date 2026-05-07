@@ -13,7 +13,7 @@ bunx opcode-pg-memory install
 
 # 或从 GitHub
 git clone https://github.com/Vbs313/opcode-pg-memory.git && cd opcode-pg-memory
-.\scripts\setup.ps1
+.\script\setup.ps1
 ```
 
 `bunx install` 会自动注册插件到 `opencode.jsonc` 并创建 `/pg-memory-init` 命令。
@@ -155,10 +155,10 @@ mcp-server.ts       # MCP 服务入口
 
 ```bash
 # 查看同步健康度
-node scripts/verify-sync.js
+node script/verify-sync.js
 
 # JSON 输出（用于自动化/监控）
-node scripts/verify-sync.js --json
+node script/verify-sync.js --json
 ```
 
 健康状态标志：
@@ -174,7 +174,7 @@ node scripts/verify-sync.js --json
 首次部署后执行一次全量同步：
 
 ```bash
-node scripts/verify-sync.js
+node script/verify-sync.js
 # 确认同步率 >= 99.5%
 ```
 
@@ -188,22 +188,22 @@ Agent 可直接调用 `sync_health()` 获取相同信息（`status`、`embedding
 
 ```bash
 # 查看待回填数量
-node scripts/backfill-embeddings.js --dry-run
+node script/backfill-embeddings.js --dry-run
 
 # 全量回填（按 created_at 顺序，支持断点续传）
-node scripts/backfill-embeddings.js
+node script/backfill-embeddings.js
 
 # 限制处理条数（快速验证）
-node scripts/backfill-embeddings.js --limit 100
+node script/backfill-embeddings.js --limit 100
 ```
 
 ## 文档
 
 | 文档 | 内容 |
 |------|------|
-| [USAGE_GUIDE.md](./USAGE_GUIDE.md) | 完整使用指南 — 配置 · 工具 · 运维 |
-| [PLUGIN_DOCUMENTATION.md](./PLUGIN_DOCUMENTATION.md) | 架构详解 — 钩子系统 · 数据库设计 |
-| [AGENTS.template.md](./AGENTS.template.md) | Agent 记忆使用指南 — 11 Agent 能力表 · 跨 Agent 共享规则 · 环境变量 |
+| [docs/USAGE_GUIDE.md](./docs/USAGE_GUIDE.md) | 完整使用指南 — 配置 · 工具 · 运维 |
+| [docs/PLUGIN_DOCUMENTATION.md](./docs/PLUGIN_DOCUMENTATION.md) | 架构详解 — 钩子系统 · 数据库设计 |
+| [AGENTS.md](./AGENTS.md) | Agent 记忆使用指南 — 11 Agent 能力表 · 跨 Agent 共享规则 · 环境变量 |
 
 ## License
 

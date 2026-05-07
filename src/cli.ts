@@ -1,5 +1,13 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync, readFileSync, existsSync, copyFileSync, readdirSync, statSync } from "node:fs";
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  copyFileSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -8,7 +16,13 @@ const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
 const OPENCODE_SKILLS_DIR = join(homedir(), ".config", "opencode", "skills");
 const PLUGIN_NAME = "opcode-pg-memory";
 const REPO_URL = "https://github.com/Vbs313/opcode-pg-memory";
-const OPENCODE_CACHE_DIR = join(homedir(), ".cache", "opencode", "packages", "opcode-pg-memory@latest");
+const OPENCODE_CACHE_DIR = join(
+  homedir(),
+  ".cache",
+  "opencode",
+  "packages",
+  "opcode-pg-memory@latest",
+);
 
 const PG_MEMORY_INIT_COMMAND = `---
 description: Initialize pg-memory with codebase knowledge
@@ -38,7 +52,7 @@ opencode --print-logs --log-level INFO | findstr "PG Memory"
 // Helper: strip JSONC comments (copied from supermemory pattern)
 function stripJsoncComments(content: string): string {
   return content
-    .replace(/\/\/.*$/gm, "")           // single-line
+    .replace(/\/\/.*$/gm, "") // single-line
     .replace(/\/\*[\s\S]*?\*\//g, ""); // multi-line
 }
 
@@ -62,8 +76,12 @@ function addPluginToConfig(configPath: string): boolean {
     }
     const jsonContent = stripJsoncComments(content);
     let config: Record<string, unknown>;
-    try { config = JSON.parse(jsonContent); }
-    catch { console.error("Failed to parse config"); return false; }
+    try {
+      config = JSON.parse(jsonContent);
+    } catch {
+      console.error("Failed to parse config");
+      return false;
+    }
 
     const plugins = (config.plugin as string[]) || [];
     plugins.push(PLUGIN_NAME);
@@ -78,13 +96,13 @@ function addPluginToConfig(configPath: string): boolean {
             return trimmed === ""
               ? `${start}\n    "${PLUGIN_NAME}"\n  ${end}`
               : `${start}${middle.trimEnd()},\n    "${PLUGIN_NAME}"\n  ${end}`;
-          }
+          },
         );
         writeFileSync(configPath, newContent);
       } else {
         const newContent = content.replace(
           /^(\s*\{)/,
-          `$1\n  "plugin": ["${PLUGIN_NAME}"],`
+          `$1\n  "plugin": ["${PLUGIN_NAME}"],`,
         );
         writeFileSync(configPath, newContent);
       }
@@ -278,7 +296,11 @@ function populateOpencodeCache(): boolean {
   const sourceDist = join(__dirname, "..", "dist");
 
   if (!existsSync(sourceDist)) {
-    console.log("  dist/ not found at", sourceDist, "- plugin not running from npm package, skipping cache");
+    console.log(
+      "  dist/ not found at",
+      sourceDist,
+      "- plugin not running from npm package, skipping cache",
+    );
     return false;
   }
 
@@ -304,7 +326,13 @@ function populateOpencodeCache(): boolean {
 
   // Also copy config files needed by the cache
   const cacheDir = OPENCODE_CACHE_DIR;
-  const sourceFiles = [".env.example", "README.md", "LICENSE", "scripts/migration-v2.sql", "package.json"];
+  const sourceFiles = [
+    ".env.example",
+    "README.md",
+    "LICENSE",
+    "script/migration-v2.sql",
+    "package.json",
+  ];
   for (const file of sourceFiles) {
     const srcFile = join(__dirname, "..", file);
     const destFile = join(cacheDir, file);
@@ -345,7 +373,7 @@ if (cmd === "install") {
 }
 
 if (cmd === "sync") {
-  syncSessions().then(code => process.exit(code));
+  syncSessions().then((code) => process.exit(code));
 }
 
 async function syncSessions(): Promise<number> {
@@ -355,14 +383,23 @@ async function syncSessions(): Promise<number> {
     const { Database } = await import("bun:sqlite");
     const { Pool } = await import("pg");
 
-    const opencodeDb = join(homedir(), ".local", "share", "opencode", "opencode.db");
+    const opencodeDb = join(
+      homedir(),
+      ".local",
+      "share",
+      "opencode",
+      "opencode.db",
+    );
     if (!existsSync(opencodeDb)) {
       console.error("OpenCode database not found at:", opencodeDb);
       return 1;
     }
 
     const sqlite = new Database(opencodeDb);
-    const rows = sqlite.query("SELECT id, title FROM session").all() as { id: string; title?: string }[];
+    const rows = sqlite.query("SELECT id, title FROM session").all() as {
+      id: string;
+      title?: string;
+    }[];
     console.log(`OpenCode sessions: ${rows.length}`);
 
     const pgPool = new Pool({
@@ -373,8 +410,12 @@ async function syncSessions(): Promise<number> {
       password: process.env.PG_PASSWORD || "",
     });
 
-    const existing = await pgPool.query("SELECT opencode_session_id FROM session_map");
-    const existingIds = new Set(existing.rows.map((r: any) => r.opencode_session_id));
+    const existing = await pgPool.query(
+      "SELECT opencode_session_id FROM session_map",
+    );
+    const existingIds = new Set(
+      existing.rows.map((r: any) => r.opencode_session_id),
+    );
     console.log(`PG sessions: ${existingIds.size}`);
 
     let inserted = 0;
@@ -382,14 +423,16 @@ async function syncSessions(): Promise<number> {
       if (!existingIds.has(row.id)) {
         await pgPool.query(
           "INSERT INTO session_map (opencode_session_id) VALUES ($1) ON CONFLICT DO NOTHING",
-          [row.id]
+          [row.id],
         );
         inserted++;
         console.log(`  + ${row.id}  ${(row.title || "").substring(0, 50)}`);
       }
     }
 
-    console.log(`\nInserted: ${inserted}, Total: ${existingIds.size + inserted}`);
+    console.log(
+      `\nInserted: ${inserted}, Total: ${existingIds.size + inserted}`,
+    );
     await pgPool.end();
     sqlite.close();
     return 0;
@@ -402,5 +445,3 @@ async function syncSessions(): Promise<number> {
 console.error(`Unknown command: ${cmd}`);
 printHelp();
 process.exit(1);
-
-

@@ -17,6 +17,7 @@ import { Pool } from 'pg';
 import { initializeDatabase, DatabaseConfig } from './src/db/init-db';
 import { recallMemory, RecallMemoryInput } from './src/mcp/recall-memory';
 import { hindsightReflect, HindsightReflectInput } from './src/mcp/hindsight-reflect';
+import { importDocument, ImportDocumentInput } from './src/mcp/import-document';
 import { createLogger } from './src/services/logger';
 
 const logger = createLogger('mcp-server');
@@ -137,7 +138,39 @@ const TOOLS: Tool[] = [
       },
       required: []
     }
-  }
+  },
+  {
+      name: 'import_document',
+      description: '将外部文档原子性导入记忆库。删除该 source 的旧记录并插入新分块（带 embedding）。支持语义边界分块（按 markdown heading）。用于知识库同步和增量更新。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          source: {
+            type: 'string',
+            description: '文档唯一标识，推荐格式：相对路径#段落标识（如 docs/ARCHITECTURE.md#section-3）'
+          },
+          content: {
+            type: 'string',
+            description: '文档内容（纯文本，将由服务端自动按语义边界分块）'
+          },
+          session_id: {
+            type: 'string',
+            description: '可选的 session_id，不传则使用默认可用 session'
+          },
+          overlap: {
+            type: 'integer',
+            default: 100,
+            description: '语义边界标识之间的重叠字符数'
+          },
+          chunk_size: {
+            type: 'integer',
+            default: 1500,
+            description: '每个分块的最大字符数'
+          }
+        },
+        required: ['source', 'content']
+      }
+    }
 ];
 
 async function main() {
@@ -242,6 +275,35 @@ async function main() {
         const input = args as unknown as HindsightReflectInput;
         const result = await hindsightReflect(input, pool);
         
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      if (name === 'import_document') {
+        if (!args.source || !args.content) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: false,
+                  error: 'Missing required parameters: source, content'
+                })
+              }
+            ],
+            isError: true
+          };
+        }
+
+        const input = args as unknown as ImportDocumentInput;
+        const result = await importDocument(input, pool);
+
         return {
           content: [
             {

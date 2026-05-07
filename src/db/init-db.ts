@@ -94,7 +94,10 @@ export class DatabaseInitializer {
       // 6. 迁移旧 sessions 数据到 session_map
       await this.migrateSessionsData(client);
 
-      // 6. 初始化 OmO 适配 Schema（如果启用）
+      // 6. 迁移 observations 表新增列（source, source_hash）
+      await this.migrateObservationsSource(client);
+
+    // 7. 初始化 OmO 适配 Schema（如果启用）
       await this.initializeOmOSchema(client);
 
       await client.query('COMMIT');
@@ -213,7 +216,9 @@ export class DatabaseInitializer {
         importance INTEGER DEFAULT 3 CHECK (importance >= 1 AND importance <= 5),
         created_at TIMESTAMPTZ DEFAULT NOW(),
         message_id VARCHAR(255),
-        metadata JSONB DEFAULT '{}'
+        metadata JSONB DEFAULT '{}',
+        source VARCHAR(512),
+        source_hash VARCHAR(64)
       );
     `);
 
@@ -342,6 +347,11 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_observations_importance ON observations(importance DESC);
       CREATE INDEX IF NOT EXISTS idx_observations_created_at ON observations(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_observations_topic_segment ON observations(topic_segment_id);
+    `);
+
+    // 查找索引 for observations.source
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_observations_source ON observations(source);
     `);
 
     // HNSW 索引 for observations
@@ -492,6 +502,35 @@ export class DatabaseInitializer {
       this.logger.info('Legacy sessions data migrated to session_map');
     } catch (error) {
       this.logger.warn('Sessions migration warning (non-fatal):', error);
+    }
+  }
+
+  /**
+   * 迁移 observations 表新增列 source (VARCHAR 512) 和 source_hash (VARCHAR 64)。
+   * 用于支持 import_document MCP 工具的增量更新 + 向量去重。
+   * 兼容从 v2.3.x 升级的场景，ADD COLUMN IF NOT EXISTS 确保幂等。
+   */
+  private async migrateObservationsSource(client: PoolClient): Promise<void> {
+    try {
+      const tableExists = await client.query(`
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'observations'
+      `);
+      if (tableExists.rows.length === 0) {
+        this.logger.info('observations table not found, skipping source migration');
+        return;
+      }
+
+      await client.query(`
+        ALTER TABLE observations
+        ADD COLUMN IF NOT EXISTS source VARCHAR(512),
+        ADD COLUMN IF NOT EXISTS source_hash VARCHAR(64)
+      `);
+
+      // 索引在 createIndexes 中已创建（idx_observations_source），无需重复
+      this.logger.info('observations source columns migrated');
+    } catch (error) {
+      this.logger.warn('Observations source migration warning (non-fatal):', error);
     }
   }
 

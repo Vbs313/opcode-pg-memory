@@ -5,7 +5,7 @@
 -- which works but creates schema drift risk. This migration script makes the
 -- schema explicit and reproducible.
 -- 
--- Run: psql -d PGOMO -f scripts/migration-omo-schema.sql
+-- Run: psql -d PGOMO -f script/migration-omo-schema.sql
 
 -- 1. Add OmO columns to existing tables
 ALTER TABLE observations

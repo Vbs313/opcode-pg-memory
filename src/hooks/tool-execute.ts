@@ -95,10 +95,8 @@ export async function handleToolExecuteBefore(
     
     logger.info(`Recorded tool input: ${tool.name}`);
     
-    // ✅ 正确的钩子签名：不返回任何值（void）
   } catch (error) {
-    logger.error('Error handling tool.execute.before:', error);
-    // 出错时不阻断主流程
+    logger.error('Error handling tool.execute.after:', error);
   }
 }
 
@@ -247,11 +245,9 @@ export async function handleToolExecuteAfter(
         success: result.success
       })
     ]);
-    
-    // ✅ 正确的钩子签名：不返回任何值
+
   } catch (error) {
     logger.error('Error handling tool.execute.after:', error);
-    // 出错时不阻断主流程
   }
 }
 
