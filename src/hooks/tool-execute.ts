@@ -7,6 +7,7 @@ import {
 } from '../types';
 import { stripPrivateContent } from '../services/privacy';
 import { createLogger } from '../services/logger';
+import { getAsyncEmbedder } from '../services/async-embedder';
 
 const logger = createLogger('tool-execute');
 
@@ -65,13 +66,17 @@ export async function handleToolExecuteBefore(
     // 创建观察记录（此时还没有输出）
     await pool.query(`
       INSERT INTO observations (
-        session_id, 
+        session_map_id, 
         tool_name, 
         tool_input_summary, 
         message_id, 
         importance,
-        metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6)
+        metadata,
+        tool_call_id,
+        message_external_id,
+        tool_status,
+        tool_parameters
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     `, [
       sessionInternalId,
       tool.name,
@@ -81,7 +86,11 @@ export async function handleToolExecuteBefore(
       JSON.stringify({ 
         event: 'tool.execute.before',
         parameters: sanitizeParameters(tool.parameters)
-      })
+      }),
+      messageId,
+      messageId,
+      'pending',
+      JSON.stringify(sanitizeParameters(tool.parameters))
     ]);
     
     logger.info(`Recorded tool input: ${tool.name}`);
@@ -141,20 +150,25 @@ export async function handleToolExecuteAfter(
     // 更新观察记录
     const existingResult = await pool.query(`
       SELECT id FROM observations 
-      WHERE session_id = $1 AND message_id = $2 AND tool_name = $3
+      WHERE session_map_id = $1 AND message_id = $2 AND tool_name = $3
       ORDER BY created_at DESC
       LIMIT 1
     `, [sessionInternalId, messageId, tool.name]);
     
+    let observationId: any;
+    
     if (existingResult.rows.length > 0) {
-      const observationId = existingResult.rows[0].id;
+      observationId = existingResult.rows[0].id;
       
       await pool.query(`
         UPDATE observations 
         SET tool_output_summary = $1,
             importance = $2,
-            metadata = metadata || $3
-        WHERE id = $4
+            metadata = metadata || $3,
+            tool_status = $4,
+            tool_parameters = $5,
+            tool_error = $6
+        WHERE id = $7
       `, [
         outputSummary,
         importance,
@@ -163,20 +177,29 @@ export async function handleToolExecuteAfter(
           success: result.success,
           event: 'tool.execute.after'
         }),
+        result.success ? 'completed' : 'failed',
+        JSON.stringify(sanitizeParameters(tool.parameters)),
+        result.error || null,
         observationId
       ]);
       
       logger.info(`Updated observation: ${observationId}`);
     } else {
-      await pool.query(`
+      const insertResult = await pool.query(`
         INSERT INTO observations (
-          session_id, 
+          session_map_id, 
           tool_name, 
           tool_output_summary, 
           message_id, 
           importance,
-          metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6)
+          metadata,
+          tool_call_id,
+          message_external_id,
+          tool_status,
+          tool_parameters,
+          tool_error
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING id
       `, [
         sessionInternalId,
         tool.name,
@@ -187,16 +210,32 @@ export async function handleToolExecuteAfter(
           executionTimeMs,
           success: result.success,
           event: 'tool.execute.after'
-        })
+        }),
+        messageId,
+        messageId,
+        result.success ? 'completed' : 'failed',
+        JSON.stringify(sanitizeParameters(tool.parameters)),
+        result.error || null
       ]);
       
+      observationId = insertResult.rows[0].id;
       logger.info('Created new observation for tool output');
+    }
+    
+    // Enqueue async embedding (non-blocking)
+    if (observationId != null) {
+      const embedder = getAsyncEmbedder();
+      if (embedder) {
+        const inputSummary = summarizeToolInput(tool.parameters, mergedConfig.maxInputSummaryLength);
+        const summaryText = `[${tool.name}] ${outputSummary || inputSummary || ''}`;
+        embedder.enqueue('observations', String(observationId), summaryText, importance);
+      }
     }
     
     // 记录 token 使用（估算）
     const estimatedTokens = estimateToolTokens(tool.name, result);
     await pool.query(`
-      INSERT INTO token_usage_log (session_id, operation_type, tokens_used, metadata)
+      INSERT INTO token_usage_log (session_map_id, operation_type, tokens_used, metadata)
       VALUES ($1, $2, $3, $4)
     `, [
       sessionInternalId,

@@ -220,7 +220,7 @@ async function retrieveEntitiesByTier(
 ): Promise<Entity[]> {
   const query = `
     SELECT * FROM entities
-    WHERE (session_id = $1 OR tier = 'permanent')
+    WHERE (session_map_id = $1 OR tier = 'permanent')
       AND tier = $2
       AND weight >= $3
       AND confidence >= $4
@@ -237,7 +237,7 @@ async function retrieveEntitiesByTier(
   
   return result.rows.map(row => ({
     id: row.id,
-    session_id: row.session_id,
+    session_id: row.session_map_id,
     name: row.name,
     type: row.type,
     tier: row.tier,
@@ -264,7 +264,7 @@ async function retrieveReflectionsByTier(
   // 简化处理：检索与当前 session 相关的 reflections
   const query = `
     SELECT * FROM reflections
-    WHERE session_id = $1
+    WHERE session_map_id = $1
       AND confidence >= $2
     ORDER BY confidence DESC, created_at DESC
     LIMIT 20
@@ -277,7 +277,7 @@ async function retrieveReflectionsByTier(
   
   return result.rows.map(row => ({
     id: row.id,
-    session_id: row.session_id,
+    session_id: row.session_map_id,
     summary: row.summary,
     source_observation_ids: row.source_observation_ids || [],
     confidence: row.confidence,
@@ -287,3 +287,4 @@ async function retrieveReflectionsByTier(
     metadata: row.metadata
   }));
 }
+

@@ -120,7 +120,7 @@ async function processCompletedParts(
   // 存储为观察记录
   await pool.query(`
     INSERT INTO observations (
-      session_id,
+      session_map_id,
       tool_output_summary,
       message_id,
       importance,

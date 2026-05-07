@@ -66,7 +66,7 @@ export async function handleSessionCompacting(
     
     // 3. 记录压缩事件
     await pool.query(`
-      INSERT INTO token_usage_log (session_id, operation_type, tokens_used, metadata)
+      INSERT INTO token_usage_log (session_map_id, operation_type, tokens_used, metadata)
       VALUES ($1, $2, $3, $4)
     `, [
       sessionInternalId,
@@ -102,7 +102,7 @@ async function markCacheEntriesAsPruned(
   // 查找与这些消息相关的观察记录
   const observationResult = await pool.query(`
     SELECT id FROM observations 
-    WHERE session_id = $1 AND message_id = ANY($2)
+    WHERE session_map_id = $1 AND message_id = ANY($2)
   `, [sessionId, messageIds]);
   
   if (observationResult.rows.length === 0) {
@@ -117,7 +117,7 @@ async function markCacheEntriesAsPruned(
   const result = await pool.query(`
     UPDATE semantic_cache
     SET is_pruned = TRUE
-    WHERE session_id = $1
+    WHERE session_map_id = $1
       AND query_text IN (
         SELECT tool_output_summary FROM observations 
         WHERE id = ANY($2) AND tool_output_summary IS NOT NULL
@@ -144,7 +144,7 @@ async function determineMessagesToPreserve(
   const result = await pool.query(`
     SELECT message_id 
     FROM observations 
-    WHERE session_id = $1 
+    WHERE session_map_id = $1 
       AND message_id = ANY($2)
       AND importance >= $3
     GROUP BY message_id
@@ -201,8 +201,8 @@ export async function isMessageCompacted(
   const result = await pool.query(`
     SELECT COUNT(*) as count
     FROM observations o
-    JOIN semantic_cache sc ON o.session_id = sc.session_id
-    WHERE o.session_id = $1 
+    JOIN semantic_cache sc ON o.session_map_id = sc.session_map_id
+    WHERE o.session_map_id = $1 
       AND o.message_id = $2
       AND sc.is_pruned = TRUE
   `, [sessionId, messageId]);
@@ -237,9 +237,9 @@ export async function getCompactionStats(
   const internalId = sessionResult.rows[0].id;
   
   const [obsResult, cacheResult, highImportanceResult] = await Promise.all([
-    pool.query('SELECT COUNT(*) as count FROM observations WHERE session_id = $1', [internalId]),
-    pool.query('SELECT COUNT(*) as count FROM semantic_cache WHERE session_id = $1 AND is_pruned = TRUE', [internalId]),
-    pool.query('SELECT COUNT(*) as count FROM observations WHERE session_id = $1 AND importance >= 4', [internalId])
+    pool.query('SELECT COUNT(*) as count FROM observations WHERE session_map_id = $1', [internalId]),
+    pool.query('SELECT COUNT(*) as count FROM semantic_cache WHERE session_map_id = $1 AND is_pruned = TRUE', [internalId]),
+    pool.query('SELECT COUNT(*) as count FROM observations WHERE session_map_id = $1 AND importance >= 4', [internalId])
   ]);
   
   return {

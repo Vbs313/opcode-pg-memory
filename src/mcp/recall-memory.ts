@@ -23,6 +23,10 @@ export interface RecallMemoryInput {
     current_goal?: string;
     current_session_id?: string;
   };
+  /** Retrieval scope. 'session' = current session only, 'task' = all sessions in same task, 'project' = all sessions in same project. Default: 'session' */
+  scope?: 'session' | 'task' | 'project';
+  /** When true, consecutive same-tool observations are aggregated into summary lines. Default: false */
+  aggregate_similar?: boolean;
   /** Retrieval strategies to execute in parallel. Default: ['semantic', 'bm25', 'graph'] */
   retrieval_strategies?: Array<'semantic' | 'bm25' | 'graph' | 'keyword' | 'temporal'>;
   /** Max results to return. Default: 10 */
@@ -154,6 +158,13 @@ export async function recallMemory(
     // ── Step 0: Resolve session ID ──
     const sessionId = await resolveSessionId(input, pool);
 
+    // ── Step 0b: Resolve scope to session IDs ──
+    const scope = input.scope || 'session';
+    const sessionIds = await resolveScopeToSessionIds(pool, sessionId, scope);
+    if (scope !== 'session') {
+      logger.info(`Scope ${scope}: ${sessionIds.length} sessions`);
+    }
+
     // ── Step 1: Generate query embedding ──
     const embeddingService = getEmbeddingService();
     if (!embeddingService) {
@@ -191,7 +202,7 @@ export async function recallMemory(
     const retrievalResults = await parallelRetrieve(
       input.query,
       fusedEmbedding,
-      sessionId,
+      sessionIds,
       strategies,
       pool,
       input.filters,
@@ -210,6 +221,11 @@ export async function recallMemory(
 
     // ── Step 6: Apply filters ──
     let filteredResults = applyFilters(scoredResults, input.filters);
+
+    // ── Step 6.5: Aggregate similar observations (if enabled) ──
+    if (input.aggregate_similar && filteredResults.length > 0) {
+      filteredResults = aggregateConsecutiveSimilar(filteredResults);
+    }
 
     // ── Step 7: Cross-encoder rerank (backward compat) ──
     if (input.rerank !== false && mergedConfig.rerankEnabled) {
@@ -382,6 +398,70 @@ async function resolveExternalSessionId(
 }
 
 // ============================================================
+// Scope resolver
+// ============================================================
+
+/**
+ * Resolve scope to an array of session_map UUIDs.
+ * - 'session': returns only the base session
+ * - 'task': returns all sessions sharing the same omo_task_id
+ * - 'project': returns all sessions sharing the same project_id
+ */
+async function resolveScopeToSessionIds(
+  pool: Pool,
+  baseSessionMapId: string,
+  scope: string,
+): Promise<string[]> {
+  if (scope === 'session') {
+    return [baseSessionMapId];
+  }
+
+  if (scope === 'task') {
+    try {
+      const taskResult = await pool.query(
+        'SELECT omo_task_id FROM session_map WHERE id = $1',
+        [baseSessionMapId],
+      );
+      if (taskResult.rows.length === 0 || !taskResult.rows[0].omo_task_id) {
+        return [baseSessionMapId];
+      }
+      const omoTaskId = taskResult.rows[0].omo_task_id;
+      const sessionsResult = await pool.query(
+        'SELECT id FROM session_map WHERE omo_task_id = $1',
+        [omoTaskId],
+      );
+      const ids = sessionsResult.rows.map((r: any) => r.id);
+      return ids.length > 0 ? ids : [baseSessionMapId];
+    } catch {
+      return [baseSessionMapId];
+    }
+  }
+
+  if (scope === 'project') {
+    try {
+      const projectResult = await pool.query(
+        'SELECT project_id FROM session_map WHERE id = $1',
+        [baseSessionMapId],
+      );
+      if (projectResult.rows.length === 0 || !projectResult.rows[0].project_id) {
+        return [baseSessionMapId];
+      }
+      const projectId = projectResult.rows[0].project_id;
+      const sessionsResult = await pool.query(
+        'SELECT id FROM session_map WHERE project_id = $1',
+        [projectId],
+      );
+      const ids = sessionsResult.rows.map((r: any) => r.id);
+      return ids.length > 0 ? ids : [baseSessionMapId];
+    } catch {
+      return [baseSessionMapId];
+    }
+  }
+
+  return [baseSessionMapId];
+}
+
+// ============================================================
 // Step 2: Topic context fusion
 // ============================================================
 
@@ -495,7 +575,7 @@ function normalizeVector(vec: number[]): number[] {
 async function parallelRetrieve(
   query: string,
   queryEmbedding: number[],
-  sessionId: string,
+  sessionIds: string[],
   strategies: string[],
   pool: Pool,
   filters?: RecallMemoryInput['filters'],
@@ -510,7 +590,7 @@ async function parallelRetrieve(
     promises.push(
       (async () => {
         try {
-          const r = await semanticSearch(queryEmbedding, sessionId, pool, filterSQL);
+          const r = await semanticSearch(queryEmbedding, sessionIds, pool, filterSQL);
           results.set('semantic', r);
         } catch (err) {
           logger.warn('Semantic search failed:', err);
@@ -524,7 +604,7 @@ async function parallelRetrieve(
     promises.push(
       (async () => {
         try {
-          const r = await bm25Search(query, sessionId, pool, filterSQL);
+          const r = await bm25Search(query, sessionIds, pool, filterSQL);
           results.set('bm25', r);
         } catch (err) {
           logger.warn('BM25 search failed:', err);
@@ -538,7 +618,7 @@ async function parallelRetrieve(
     promises.push(
       (async () => {
         try {
-          const r = await graphTraversal(query, embeddingServiceFallback(query), sessionId, pool, filterSQL);
+          const r = await graphTraversal(query, embeddingServiceFallback(query), sessionIds, pool, filterSQL);
           results.set('graph', r);
         } catch (err) {
           logger.warn('Graph traversal failed:', err);
@@ -552,7 +632,7 @@ async function parallelRetrieve(
     promises.push(
       (async () => {
         try {
-          const r = await keywordSearch(query, sessionId, pool, filterSQL);
+          const r = await keywordSearch(query, sessionIds, pool, filterSQL);
           results.set('keyword', r);
         } catch (err) {
           logger.warn('Keyword search failed:', err);
@@ -603,7 +683,7 @@ function buildFilterConditions(filters?: RecallMemoryInput['filters']): {
 
 async function semanticSearch(
   queryEmbedding: number[],
-  sessionId: string,
+  sessionIds: string[],
   pool: Pool,
   filters: { sql: string; params: any[] },
 ): Promise<InternalFact[]> {
@@ -620,7 +700,7 @@ async function semanticSearch(
       FROM entities e
       LEFT JOIN session_map sm ON e.session_map_id = sm.id
       LEFT JOIN topic_segments ts ON e.topic_segment_id = ts.id
-      WHERE (e.session_map_id = $2 OR e.session_id = $2 OR e.tier = 'permanent')
+      WHERE (e.session_map_id = ANY($2::uuid[]) OR e.session_id = ANY($2::uuid[]) OR e.tier = 'permanent')
         AND e.embedding IS NOT NULL
         ${filters.sql}
       ORDER BY e.embedding <=> $1
@@ -628,7 +708,7 @@ async function semanticSearch(
     `;
     const entityResult = await pool.query(entityQuery, [
       queryEmbedding,
-      sessionId,
+      sessionIds,
       ...filters.params.filter((_, i) => i < filters.params.length),
     ]);
     facts.push(
@@ -665,12 +745,12 @@ async function semanticSearch(
       FROM observations o
       LEFT JOIN session_map sm ON o.session_map_id = sm.id
       LEFT JOIN topic_segments ts ON o.topic_segment_id = ts.id
-      WHERE (o.session_map_id = $2 OR o.session_id = $2)
+      WHERE (o.session_map_id = ANY($2::uuid[]) OR o.session_id = ANY($2::uuid[]))
         AND o.embedding IS NOT NULL
       ORDER BY o.embedding <=> $1
       LIMIT ${PER_STRATEGY_LIMIT}
     `;
-    const obsResult = await pool.query(obsQuery, [queryEmbedding, sessionId]);
+    const obsResult = await pool.query(obsQuery, [queryEmbedding, sessionIds]);
     facts.push(
       ...obsResult.rows.map((row) => ({
         id: row.id,
@@ -703,12 +783,12 @@ async function semanticSearch(
       FROM reflections r
       LEFT JOIN session_map sm ON r.session_map_id = sm.id
       LEFT JOIN topic_segments ts ON r.topic_segment_id = ts.id
-      WHERE (r.session_map_id = $2 OR r.session_id = $2)
+      WHERE (r.session_map_id = ANY($2::uuid[]) OR r.session_id = ANY($2::uuid[]))
         AND r.embedding IS NOT NULL
       ORDER BY r.embedding <=> $1
       LIMIT ${PER_STRATEGY_LIMIT / 2}
     `;
-    const refResult = await pool.query(refQuery, [queryEmbedding, sessionId]);
+    const refResult = await pool.query(refQuery, [queryEmbedding, sessionIds]);
     facts.push(
       ...refResult.rows.map((row) => ({
         id: row.id,
@@ -740,7 +820,7 @@ async function semanticSearch(
 
 async function bm25Search(
   query: string,
-  sessionId: string,
+  sessionIds: string[],
   pool: Pool,
   filters: { sql: string; params: any[] },
 ): Promise<InternalFact[]> {
@@ -756,7 +836,7 @@ async function bm25Search(
              e.first_seen_at as created_at, e.confidence,
              e.session_id, e.session_map_id, e.topic_segment_id
       FROM entities e
-      WHERE (e.session_map_id = $2 OR e.session_id = $2 OR e.tier = 'permanent')
+      WHERE (e.session_map_id = ANY($2::uuid[]) OR e.session_id = ANY($2::uuid[]) OR e.tier = 'permanent')
         AND (e.name % $1 OR e.description % $1)
         ${filters.sql}
       ORDER BY similarity(e.name, $1) DESC
@@ -764,7 +844,7 @@ async function bm25Search(
     `;
     const entityResult = await pool.query(entityQuery, [
       query,
-      sessionId,
+      sessionIds,
       ...filters.params,
     ]);
     facts.push(
@@ -801,7 +881,7 @@ async function bm25Search(
 async function graphTraversal(
   query: string,
   _queryEmb: number[],
-  sessionId: string,
+  sessionIds: string[],
   pool: Pool,
   filters: { sql: string; params: any[] },
 ): Promise<InternalFact[]> {
@@ -814,11 +894,11 @@ async function graphTraversal(
     seedQuery = `
       SELECT id, name, type
       FROM entities
-      WHERE (session_map_id = $1 OR session_id = $1 OR tier = 'permanent')
+      WHERE (session_map_id = ANY($1::uuid[]) OR session_id = ANY($1::uuid[]) OR tier = 'permanent')
         AND (name ILIKE $2 OR description ILIKE $2)
       LIMIT 5
     `;
-    seedParams = [sessionId, `%${query}%`];
+    seedParams = [sessionIds, `%${query}%`];
   } catch {
     return [];
   }
@@ -880,7 +960,7 @@ async function graphTraversal(
 
 async function keywordSearch(
   query: string,
-  sessionId: string,
+  sessionIds: string[],
   pool: Pool,
   filters: { sql: string; params: any[] },
 ): Promise<InternalFact[]> {
@@ -895,12 +975,12 @@ async function keywordSearch(
              e.first_seen_at as created_at, e.confidence,
              e.session_id, e.session_map_id, e.topic_segment_id
       FROM entities e
-      WHERE (e.session_map_id = $1 OR e.session_id = $1 OR e.tier = 'permanent')
+      WHERE (e.session_map_id = ANY($1::uuid[]) OR e.session_id = ANY($1::uuid[]) OR e.tier = 'permanent')
         AND (e.name ~* $2 OR e.description ~* $2)
         ${filters.sql}
       LIMIT ${PER_STRATEGY_LIMIT}
     `;
-    const entityResult = await pool.query(entityQuery, [sessionId, pattern, ...filters.params]);
+    const entityResult = await pool.query(entityQuery, [sessionIds, pattern, ...filters.params]);
     return entityResult.rows.map((row) => ({
       id: row.id,
       type: 'entity' as const,
@@ -1085,6 +1165,77 @@ function applyFilters(
 
     return true;
   });
+}
+
+// ============================================================
+// Step 6b: Aggregate similar consecutive observations
+// ============================================================
+
+/**
+ * When aggregate_similar is true, merges consecutive InternalFact items
+ * that share the same tool_name and completed status into single summary entries.
+ * Only affects observation-type facts.
+ */
+function aggregateConsecutiveSimilar(facts: InternalFact[]): InternalFact[] {
+  if (facts.length === 0) return facts;
+  
+  const result: InternalFact[] = [];
+  let i = 0;
+  
+  while (i < facts.length) {
+    const current = facts[i];
+    
+    // Only aggregate observation-type, completed tool calls
+    if (current.type === 'observation' && 
+        current.metadata?.source && 
+        current.metadata?.toolName &&
+        current.content) {
+      
+      const toolName = current.metadata.toolName;
+      
+      // Count consecutive same-tool observations
+      let j = i + 1;
+      while (j < facts.length &&
+             facts[j].type === 'observation' &&
+             facts[j].metadata?.toolName === toolName) {
+        j++;
+      }
+      
+      const count = j - i;
+      
+      if (count >= 2) {
+        // Merge: keep the last (most recent) item, update its content
+        const last = facts[j - 1];
+        const firstContent = current.content.length > 80 
+          ? current.content.substring(0, 80) + '...' 
+          : current.content;
+        const lastContent = last.content.length > 80 
+          ? last.content.substring(0, 80) + '...' 
+          : last.content;
+        
+        result.push({
+          ...last,
+          content: `[${toolName} ×${count}] ${lastContent}`,
+          relevanceScore: Math.max(current.relevanceScore, last.relevanceScore),
+          metadata: {
+            ...last.metadata,
+            aggregated: true,
+            aggregateCount: count,
+            aggregateRange: `${firstContent} ... ${lastContent}`,
+          },
+        });
+        
+        i = j; // Skip all merged items
+        continue;
+      }
+    }
+    
+    // No aggregation: keep as-is
+    result.push(current);
+    i++;
+  }
+  
+  return result;
 }
 
 // ============================================================

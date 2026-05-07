@@ -7,6 +7,11 @@
  * - message: data TEXT (JSON) → role, agent, modelID, tokens, time
  * - part: data TEXT (JSON) → type(text/tool), tool, callID, state
  * - event: data TEXT (JSON), type, aggregate_id, seq
+ *
+ * 三阶段同步策略：
+ *   1. 会话同步 — 检测新 session
+ *   2. 批量工具调用同步 — 基于游标分页，消除 N+1
+ *   3. 进度追踪 — lastSyncTime 游标
  */
 import { Pool } from 'pg';
 import { OpenCodeSchemaAdapter, ParsedPart, ParsedMessageMeta } from './opencode-schema-adapter';
@@ -15,6 +20,7 @@ import { createLogger } from './logger';
 import type { PluginEvent, PluginEventType } from '../types';
 
 const logger = createLogger('db-polling');
+const BATCH_SIZE = 100;
 
 export interface DBPollingConfig {
   intervalMs: number;
@@ -69,7 +75,7 @@ export class OpenCodeDBPollingSource {
     if (!this.adapter.isConnected() && !this.adapter.connect()) return;
 
     try {
-      // 1. Sync new sessions
+      // ── Phase 1: Sync new sessions ──
       const sessions = this.adapter.getRecentSessions();
       for (const s of sessions) {
         if (!this.knownSessions.has(s.id)) {
@@ -78,36 +84,42 @@ export class OpenCodeDBPollingSource {
         }
       }
 
-      // 2. Sync recent messages (parse from JSON)
-      const messages = this.adapter.getRecentMessages(this.lastSyncTime || undefined);
-      for (const m of messages) {
-        if (!this.knownSessions.has(m.session_id)) continue;
-        const role = m.meta?.role || 'unknown';
-        const agent = m.meta?.agent || m.meta?.modelID || undefined;
+      // ── Phase 2: Batch sync tool calls ──
+      // Use cursor-based pagination to avoid N+1 queries and ensure reliable progress
+      const since = this.lastSyncTime || undefined;
+      const totalToolCalls = this.adapter.getToolCallsCount(since);
+      if (totalToolCalls > 0) {
+        logger.info('Batch syncing tool calls', { total: totalToolCalls, batchSize: BATCH_SIZE, lastSyncTime: this.lastSyncTime });
+        for (let offset = 0; offset < totalToolCalls; offset += BATCH_SIZE) {
+          const toolCalls = this.adapter.getToolCallsSince(since, BATCH_SIZE, offset);
+          if (toolCalls.length === 0) break;
 
-        // Emit message.updated event
-        await this.synchronizer.handleEvent(this.event('message.updated', m.session_id, {
-          message: { id: m.id, role, agent },
-          message_id: m.id,
-        }));
-
-        // 3. For each message, check its parts for tool calls
-        const toolCalls = this.adapter.getToolCallsByMessage(m.id);
-        for (const tc of toolCalls) {
-          await this.synchronizer.handleEvent(this.event('tool.execute.after', m.session_id, {
-            toolName: tc.tool || 'unknown',
-            callID: tc.callID,
-            result: {
-              success: tc.state?.status === 'completed',
-              data: tc.state?.output,
-              error: tc.state?.status === 'failed' ? tc.state?.output : undefined,
-            },
-            executionTimeMs: 0,
-            parameters: tc.state?.input || {},
-          }));
+          for (const tc of toolCalls) {
+            await this.synchronizer.handleEvent({
+              id: `tool.execute.after:${tc.sessionId}:${Date.now()}:${tc.callID}`,
+              type: 'tool.execute.after',
+              sessionId: tc.sessionId,
+              timestamp: Date.now(),
+              version: 1,
+              source: 'poll',
+              data: {
+                toolName: tc.tool,
+                callID: tc.callID,    // ← CRITICAL: ensures unique dedup key per tool call
+                result: {
+                  success: tc.status === 'completed',
+                  data: tc.output,
+                  error: tc.status === 'failed' ? tc.output : undefined,
+                },
+                executionTimeMs: 0,
+                parameters: tc.input || {},
+              },
+            });
+          }
+          logger.info('Batch progress', { offset: offset + toolCalls.length, total: totalToolCalls });
         }
       }
 
+      // ── Phase 3: Advance cursor so next cycle only picks up new tool calls ──
       this.lastSyncTime = Date.now();
       this.currentInterval = this.config.intervalMs; // Reset on success
 

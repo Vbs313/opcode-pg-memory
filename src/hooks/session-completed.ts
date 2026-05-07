@@ -88,7 +88,7 @@ export async function handleSessionCompleted(
     // 4. 记录会话完成
     await pool.query(`
       UPDATE session_map 
-      SET updated_at = NOW(),
+      SET last_active_at = NOW(),
           metadata = metadata || $1
       WHERE id = $2
     `, [
@@ -103,7 +103,7 @@ export async function handleSessionCompleted(
     
     // 5. 记录 token 使用
     await pool.query(`
-      INSERT INTO token_usage_log (session_id, operation_type, tokens_used, metadata)
+      INSERT INTO token_usage_log (session_map_id, operation_type, tokens_used, metadata)
       VALUES ($1, $2, $3, $4)
     `, [
       sessionInternalId,
@@ -135,7 +135,7 @@ async function getObservationStats(
 ): Promise<{ totalCount: number; countSinceLastReflection: number }> {
   // 总观察数
   const totalResult = await pool.query(
-    'SELECT COUNT(*) as count FROM observations WHERE session_id = $1',
+    'SELECT COUNT(*) as count FROM observations WHERE session_map_id = $1',
     [sessionId]
   );
   
@@ -147,7 +147,7 @@ async function getObservationStats(
     const sinceResult = await pool.query(`
       SELECT COUNT(*) as count 
       FROM observations 
-      WHERE session_id = $1 AND created_at > $2
+      WHERE session_map_id = $1 AND created_at > $2
     `, [sessionId, reflectionLastAt]);
     countSinceLastReflection = parseInt(sinceResult.rows[0].count, 10);
   }
@@ -183,7 +183,7 @@ async function checkShouldTriggerReflection(
   const pendingResult = await pool.query(`
     SELECT COUNT(*) as count 
     FROM reflections 
-    WHERE session_id = $1 AND created_at > NOW() - INTERVAL '1 hour'
+    WHERE session_map_id = $1 AND created_at > NOW() - INTERVAL '1 hour'
   `, [sessionId]);
   
   const pendingCount = parseInt(pendingResult.rows[0].count, 10);
@@ -237,7 +237,7 @@ async function executeReflection(
       SELECT id, tool_name, tool_input_summary, tool_output_summary, 
              importance, created_at, metadata
       FROM observations
-      WHERE session_id = $1
+      WHERE session_map_id = $1
       ORDER BY importance DESC, created_at DESC
       LIMIT 100
     `, [sessionId]);
@@ -276,7 +276,8 @@ async function executeReflection(
     // 4. 更新会话的 reflection_last_at
     await pool.query(`
       UPDATE session_map 
-      SET reflection_last_at = NOW()
+      SET last_active_at = NOW(),
+          metadata = metadata || '{"reflected":true}'::jsonb
       WHERE id = $1
     `, [sessionId]);
     

@@ -217,6 +217,93 @@ export class OpenCodeSchemaAdapter {
     return results;
   }
 
+  // ── 批量工具查询 ──────────────────────────────────
+
+  /** 批量获取工具调用（JOIN 查询，避免 N+1），支持增量拉取和分页 */
+  getToolCallsSince(sinceTime?: number, limit?: number, offset?: number): Array<{
+    messageId: string;
+    sessionId: string;
+    tool: string;
+    callID: string;
+    input?: any;
+    output?: any;
+    status: string;
+    partId: string;
+    timeCreated: number;
+  }> {
+    try {
+      let sql = `
+        SELECT m.id as message_id, m.session_id, m.time_created, p.id as part_id, p.data as part_data
+        FROM message m
+        JOIN part p ON p.message_id = m.id
+        WHERE 1=1
+      `;
+      const params: any[] = [];
+      if (sinceTime) {
+        sql += ' AND m.time_created > ?';
+        params.push(sinceTime);
+      }
+      sql += ' ORDER BY m.time_created ASC, p.time_created ASC';
+      if (limit !== undefined) {
+        sql += ' LIMIT ?';
+        params.push(limit);
+      }
+      if (offset !== undefined) {
+        sql += ' OFFSET ?';
+        params.push(offset);
+      }
+      const rows = this.queryAll(sql, ...params) as Array<{
+        message_id: string;
+        session_id: string;
+        time_created: number;
+        part_id: string;
+        part_data: string;
+      }>;
+      const results: Array<any> = [];
+      for (const row of rows) {
+        const parsed = this.parsePart(row.part_data);
+        if (!parsed || parsed.type !== 'tool') continue;
+        results.push({
+          messageId: row.message_id,
+          sessionId: row.session_id,
+          tool: parsed.tool || 'unknown',
+          callID: parsed.callID || `gen_${row.part_id}`,
+          input: parsed.state?.input,
+          output: parsed.state?.output,
+          status: parsed.state?.status || 'unknown',
+          partId: row.part_id,
+          timeCreated: row.time_created,
+        });
+      }
+      return results;
+    } catch (err: any) {
+      logger.warn('Failed to query tool calls since', { error: err.message });
+      return [];
+    }
+  }
+
+  /** 获取工具调用总数（用于进度追踪） */
+  getToolCallsCount(sinceTime?: number): number {
+    try {
+      let sql = `
+        SELECT count(*) as cnt
+        FROM message m
+        JOIN part p ON p.message_id = m.id
+        WHERE 1=1
+      `;
+      const params: any[] = [];
+      if (sinceTime) {
+        sql += ' AND m.time_created > ?';
+        params.push(sinceTime);
+      }
+      const row = this.queryGet(sql, ...params) as any;
+      return row?.cnt || 0;
+    } catch (err: any) {
+      logger.warn('Failed to count tool calls', { error: err.message });
+      return 0;
+    }
+  }
+
   /** 检查数据库是否可访问 */
   healthCheck(): { ok: boolean; drizzleVersion: number; sessionCount: number; messageCount: number } {
     try {

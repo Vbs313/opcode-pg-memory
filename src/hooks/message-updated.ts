@@ -50,10 +50,8 @@ export async function handleMessageUpdated(
   logger.info(`Message updated: ${message.id}, role: ${message.role}`);
   
   try {
-    // 1. 存储原始消息（异步，不阻塞主流程）
-    storeMessage(session.id, message, pool).catch(err => 
-      logger.warn('Failed to store message:', err.message)
-    );
+    // storeMessage disabled: messages table removed in v2.3.2
+    // Raw messages stored only in OpenCode SQLite
     
     // 2. 获取 session 内部 ID
     const sessionResult = await pool.query(
@@ -87,9 +85,9 @@ export async function handleMessageUpdated(
 }
 
 /**
- * 存储原始消息到 messages 表
- * 支持 OpenCode 的完整消息结构（包含 parts 数组）
- */
+ * storeMessage disabled: messages table removed in v2.3.2
+ * Raw messages stored only in OpenCode SQLite
+ *//*
 async function storeMessage(
   sessionId: string,
   message: OpenCodeMessage,
@@ -186,6 +184,7 @@ async function storeMessage(
     throw error;
   }
 }
+*/
 
 /**
  * 从消息内容中提取实体和关系（统一入口）
@@ -251,7 +250,7 @@ async function extractEntities(
     // 检查是否已存在相同实体
     const existingResult = await pool.query(`
       SELECT id, weight FROM entities 
-      WHERE session_id = $1 AND name = $2 AND type = $3
+      WHERE session_map_id = $1 AND name = $2 AND type = $3
     `, [sessionId, extracted.name, extracted.type]);
     
     if (existingResult.rows.length > 0) {

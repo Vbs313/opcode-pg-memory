@@ -10,6 +10,7 @@ import { recallMemory, RecallMemoryInput } from './mcp/recall-memory';
 import { hindsightReflect } from './mcp/hindsight-reflect';
 import { createCacheManager, SemanticCacheManager } from './cache/semantic-cache';
 import { createLogger } from './services/logger';
+import { initAsyncEmbedder, getAsyncEmbedder } from './services/async-embedder';
 import { OpenCodeDBPollingSource } from './services/db-polling';
 import { EventSynchronizer } from './services/event-synchronizer';
 const logger = createLogger('plugin');
@@ -218,6 +219,12 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
   const eventSync = new EventSynchronizer(pool, {
     mode: (process.env.PG_MEMORY_SYNC_MODE || 'hybrid') as any,
     pollingIntervalMs: parseInt(process.env.PG_MEMORY_POLL_INTERVAL || '5000'),
+  });
+
+  // Initialize async embedder for observations
+  initAsyncEmbedder(pool, {
+    cooldownMs: parseInt(process.env.PG_MEMORY_EMBED_COOLDOWN || '300000'),
+    minImportance: parseInt(process.env.PG_MEMORY_EMBED_MIN_IMPORTANCE || '3'),
   });
 
   let dbPolling: OpenCodeDBPollingSource | null = null;
@@ -491,6 +498,17 @@ Call this AFTER completing significant work to extract reusable patterns.
           session_id: {
             type: 'string',
             description: '当前会话ID，用于上下文过滤',
+          },
+          scope: {
+            type: 'string',
+            enum: ['session', 'task', 'project'],
+            default: 'session',
+            description: '检索范围：session=当前会话, task=同任务所有会话, project=同项目所有会话',
+          },
+          aggregate_similar: {
+            type: 'boolean',
+            default: false,
+            description: '为true时，连续的同名工具调用合并为一条摘要（如 "read ×47 最近读取了..."）',
           },
           retrieval_strategies: {
             type: 'array',

@@ -73,10 +73,17 @@ git clone https://github.com/Vbs313/opcode-pg-memory.git && cd opcode-pg-memory
 recall_memory({
   "query": "数据库连接池配置",
   "caller_context": { "type": "omo_agent", "current_goal": "性能调优" },
+  "scope": "task",
+  "aggregate_similar": true,
   "retrieval_strategies": ["semantic", "graph"],
   "filters": { "tier": "project" }
 })
 ```
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `scope` | `session` / `task` / `project` | `session` | 检索范围：当前会话 / 同任务所有会话 / 同项目所有会话 |
+| `aggregate_similar` | `boolean` | `false` | 合并连续同名工具调用（如 `read ×47 最近读取了...`），仅在查询层聚合，不丢失明细 |
 
 ### hindsight_reflect
 
@@ -109,6 +116,52 @@ src/
 ├── cache/          # 语义缓存
 └── omo/            # OmO 适配器
 mcp-server.ts       # MCP 服务入口
+```
+
+## 运维
+
+### 同步对账
+
+```bash
+# 查看同步健康度
+node scripts/verify-sync.js
+
+# JSON 输出（用于自动化/监控）
+node scripts/verify-sync.js --json
+```
+
+健康状态标志：
+
+| 指标 | 健康 | 告警 |
+|------|------|------|
+| 同步率 | ≥ 99.5% | < 99% |
+| tool_status = 'failed' 占比 | < 5% | > 10% |
+| 缺失会话数 | 0 | > 0 |
+| 含 tool_call_id 比例 | 100% | < 99% |
+| embedding 覆盖度 | ≥ 95% | < 95% |
+
+首次部署后执行一次全量同步：
+
+```bash
+node scripts/verify-sync.js
+# 确认同步率 >= 99.5%
+```
+
+`verify-sync.js` 是只读脚本，不修改数据库。同步由 EventSynchronizer 自动通过 OpenCode 事件总线或 SQLite 轮询完成。
+
+### 批量 embedding 回填
+
+首次部署或新增 embedding 模型后，对历史观察生成向量：
+
+```bash
+# 查看待回填数量
+node scripts/backfill-embeddings.js --dry-run
+
+# 全量回填（按 created_at 顺序，支持断点续传）
+node scripts/backfill-embeddings.js
+
+# 限制处理条数（快速验证）
+node scripts/backfill-embeddings.js --limit 100
 ```
 
 ## 文档
