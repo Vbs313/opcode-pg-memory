@@ -18,6 +18,54 @@ git clone https://github.com/Vbs313/opcode-pg-memory.git && cd opcode-pg-memory
 
 `bunx install` 会自动注册插件到 `opencode.jsonc` 并创建 `/pg-memory-init` 命令。
 
+## 项目结构
+
+```
+opcode-pg-memory/
+├── src/
+│   ├── index.ts               # 插件入口 — 注册全部 7 个生命周期钩子
+│   ├── config.ts               # Zod 配置层 — 环境变量 → 文件 → 默认值三层合并
+│   ├── types.ts                # 类型定义
+│   ├── cli.ts                  # CLI 安装工具
+│   ├── db/
+│   │   └── init-db.ts           # PostgreSQL 数据库初始化（全表结构 + 迁移）
+│   ├── hooks/
+│   │   ├── tool-execute.ts      # tool.execute.before/after — 自动记录工具调用到记忆
+│   │   ├── session-created.ts   # session 创建钩子
+│   │   ├── session-completed.ts # session 完成钩子
+│   │   ├── session-compacting.ts# 会话压缩钩子
+│   │   ├── message-updated.ts   # 消息更新钩子
+│   │   └── message-part-updated.ts
+│   ├── mcp/
+│   │   ├── recall-memory.ts     # 多策略语义检索（BM25 + 向量 + 图遍历 + 关键词）
+│   │   ├── hindsight-reflect.ts # 跨会话反思
+│   │   ├── import-document.ts   # 文档导入（事务性 DELETE+INSERT + 语义分块）
+│   │   ├── backfill-embeddings.ts # 向量回填
+│   │   └── sync-health.ts       # 同步健康检查
+│   ├── services/
+│   │   ├── async-embedder.ts    # 异步 embedding 队列
+│   │   ├── event-synchronizer.ts# 事件同步器
+│   │   ├── keyword.ts           # 关键词检测
+│   │   └── logger.ts            # 日志
+│   ├── utils/
+│   │   ├── error-classifier.ts  # 错误分类系统（7 类 × 20+ 模式匹配，对标 oh-my-openagent）
+│   │   ├── embedding.ts         # Embedding 服务
+│   │   └── token-budget.ts      # Token 预算计算
+│   └── cache/
+│       └── semantic-cache.ts    # 语义缓存（向量相似度去重）
+├── mcp-server.ts               # MCP 服务器入口（TOOL_HANDLERS 注册表模式）
+├── index.ts                    # 插件导出入口
+├── script/                     # 运维脚本
+│   ├── setup.ps1                # Windows 安装脚本
+│   ├── migration-v2.sql         # 数据库迁移
+│   └── doc-indexer.mjs          # 文档知识库索引（直连 PostgreSQL）
+├── docs/                       # 文档
+│   ├── PLUGIN_DOCUMENTATION.md  # 架构详解
+│   ├── USAGE_GUIDE.md           # 使用指南
+│   └── 新方向.md                 # 架构升级规划
+└── AGENTS.md                   # Agent 记忆使用指南
+```
+
 ## 注册
 
 在 `~/.config/opencode/opencode.jsonc` 中确认 MCP 配置：
@@ -109,7 +157,34 @@ sync_health()
 
 Agent 自愈模式：`sync_health` 发现 coverage < 95% → `backfill_embeddings` → `sync_health` 确认恢复。
 
-### backfill_embeddings
+### import_document
+
+```json
+// 导入文档到记忆库（原子性 DELETE+INSERT）
+import_document({
+  "source": "docs/ARCHITECTURE.md#section-3",
+  "content": "项目架构说明..."
+})
+```
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `source` | `string` | 必填 | 文档唯一标识（推荐 `路径#段落`） |
+| `content` | `string` | 必填 | 文档内容（自动按 markdown heading 语义分块） |
+| `overlap` | `int` | 100 | 分块重叠字符数 |
+| `chunk_size` | `int` | 1500 | 每块最大字符数 |
+
+所有 MCP 工具通过 `TOOL_HANDLERS` 注册表派发（`mcp-server.ts`），新增工具只需在注册表中添加一行。
+
+## 架构特性
+
+| 特性 | 说明 |
+|------|------|
+| **Zod 配置层** | 所有配置通过 `ConfigSchema` 校验（`src/config.ts`），支持 env → file → 默认值三层合并 |
+| **错误分类系统** | `src/utils/error-classifier.ts` — 7 类错误 × 20+ 模式匹配，`guard()` / `guardSync()` 包装器 |
+| **注册表派发** | `TOOL_HANDLERS` 替代 if-chain，新增工具只需一行 |
+| **事务性操作** | `import_document` 在单事务内完成 DELETE+INSERT |
+| **语义分块** | 按 markdown heading → 段落 → 硬切三级 fallback |## backfill_embeddings
 
 ```json
 // 回填缺失的 embedding
@@ -199,12 +274,23 @@ node script/backfill-embeddings.js --limit 100
 
 ## 文档
 
-| 文档 | 内容 |
-|------|------|
-| [docs/USAGE_GUIDE.md](./docs/USAGE_GUIDE.md) | 完整使用指南 — 配置 · 工具 · 运维 |
-| [docs/PLUGIN_DOCUMENTATION.md](./docs/PLUGIN_DOCUMENTATION.md) | 架构详解 — 钩子系统 · 数据库设计 |
-| [AGENTS.md](./AGENTS.md) | Agent 记忆使用指南 — 11 Agent 能力表 · 跨 Agent 共享规则 · 环境变量 |
+| 文档 | 内容 | 路径 |
+|------|------|------|
+| **使用指南** | 完整配置 · 工具调用 · 运维 | [docs/USAGE_GUIDE.md](./docs/USAGE_GUIDE.md) |
+| **架构详解** | 钩子系统 · 数据库设计 · 错误分类 | [docs/PLUGIN_DOCUMENTATION.md](./docs/PLUGIN_DOCUMENTATION.md) |
+| **Agent 指南** | 11 Agent 能力表 · 跨 Agent 共享规则 | [AGENTS.md](./AGENTS.md) |
+| **架构升级** | Zod 配置 + 错误分类 + 注册表重构记录 | [docs/新方向.md](./docs/新方向.md) |
 
-## License
+## 数据流
+
+```
+Agent 调用 MCP 工具
+  └→ mcp-server.ts (TOOL_HANDLERS 注册表派发)
+      └→ src/mcp/*.ts (工具逻辑)
+          └→ src/db/init-db.ts (PostgreSQL + pgvector)
+              └→ observations / entities / reflections / relations 表
+```
+
+Agent 每次工具调用自动记录到 `observations` 表（通过 `tool.execute.before/after` 钩子），后续可通过 `recall_memory` 检索。
 
 [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.html)

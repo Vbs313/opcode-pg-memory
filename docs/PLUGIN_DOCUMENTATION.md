@@ -18,6 +18,42 @@
 
 ## 1. 架构概览
 
+### v2.4.3 架构层次（2026-05 重构后）
+
+```
+配置层 (src/config.ts)
+  Zod ConfigSchema — 环境变量 → pg-memory.jsonc → 默认值 三层合并
+  运行时校验，类型安全，消除手动 as 强转
+
+钩子层 (src/hooks/)
+  7 个 OpenCode 生命周期钩子
+  tool.execute.before → 记录入参
+  tool.execute.after  → 记录出参 + 格式化
+  session.created / completed / compacting
+  message-updated / message-part-updated
+
+工具层 (src/mcp/)
+  TOOL_HANDLERS 注册表派发（mcp-server.ts）
+  recall_memory | hindsight_reflect | import_document
+  | backfill_embeddings | sync_health
+
+存储层 (src/db/)
+  PostgreSQL + pgvector
+  observations | entities | reflections | relations | topic_segments | session_map
+
+错误处理 (src/utils/error-classifier.ts)
+  7 类 × 20+ 模式匹配
+  guard() / guardSync() 结构化 try/catch
+  不再静默吞异常
+```
+
+### 设计原则
+
+1. **配置单一来源** — 所有配置字段由 `ConfigSchema` (Zod) 定义类型和默认值，消除 interface + 手动 as 双重维护
+2. **错误可见性** — 不再 `try/catch { /* 降级 */ }`，至少写 stderr 告知用户
+3. **注册表派发** — `TOOL_HANDLERS` 替代 if-chain，新增工具只需一行
+4. **事务安全** — `import_document` 在单事务内完成 DELETE + INSERT，REINDEX 在事务外异步执行
+
 ### 1.1 插件定位
 
 ```
@@ -888,7 +924,7 @@ opcode-pg-memory/
 │       ├── adapter.ts              # OmO 适配器
 │       └── types.ts                # OmO 类型
 ├── dist/                           # 编译输出
-├── scripts/                       # 安装脚本
+├── script/                         # 运维脚本
 ├── tests/                         # 测试
 ├── package.json
 ├── tsconfig.json
@@ -914,12 +950,53 @@ opcode-pg-memory/
 ### C. 相关文档
 
 - [README.md](./README.md) - 快速开始
-- [POSTGRESQL_WINDOWS_SETUP.md](./POSTGRESQL_WINDOWS_SETUP.md) - PostgreSQL 安装
-- [OMO_INTEGRATION.md](./OMO_INTEGRATION.md) - Oh My OpenAgent 集成
+- [USAGE_GUIDE.md](./USAGE_GUIDE.md) - 使用指南
+- [AGENTS.md](../AGENTS.md) - Agent 记忆使用指南
 - [spec.md](./spec.md) - 技术规格
+
+### D. 错误分类系统（v2.4.3 新增）
+
+`src/utils/error-classifier.ts` — 对标 oh-my-openagent 的多层防御网设计：
+
+| 特性 | 说明 |
+|------|------|
+| **7 类错误** | connection / query / embedding / config / data / internal / external |
+| **4 级严重度** | fatal > error > warn > info |
+| **20+ 模式匹配** | 正则匹配已知错误信息，自动分类 |
+| **恢复建议** | 分类器附带修复提示（如 "检查 ollama 是否运行"） |
+| **包装器** | `guard<T>(promise, category)` 返回 `[result, error]` 元组 |
+| **不再静默** | `reportError()` 在 fatal/error 时写 stderr |
+
+```typescript
+// 之前：静默吞异常
+try { await pool.query(...) } catch { /* 不知道发生了什么 */ }
+
+// 现在：分类 + 可见
+const [result, err] = await guard(pool.query(sql), "query");
+if (err?.severity === "fatal") process.exit(1);
+```
+
+### E. Zod 配置层（v2.4.3 新增）
+
+`src/config.ts` 使用 Zod schema 替代手动 `interface` + `as` 强转：
+
+| 优势 | 说明 |
+|------|------|
+| **类型推导** | `PgMemoryConfig` 类型由 `ConfigSchema` 自动推导 |
+| **运行时校验** | 启动时 `safeParse()` 校验，非法配置打印警告 |
+| **coerce 转换** | `z.coerce.number()` 自动处理字符串 → 数字转换 |
+| **范围约束** | port [1-65535]、阈值 [0-1]、正数校验 |
+
+```typescript
+// 之前：手动 as + parseInt
+const pgPort = parseInt(process.env.PG_PORT || "5432", 10);
+
+// 现在：Zod schema
+pgPort: z.coerce.number().int().min(1).max(65535).default(5432),
+```
 
 ---
 
-**文档版本**: 1.0  
-**最后更新**: 2026-05-06  
-**插件版本**: 1.0.0
+**文档版本**: 2.0  
+**最后更新**: 2026-05-07  
+**插件版本**: 2.4.3

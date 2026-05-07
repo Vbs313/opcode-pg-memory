@@ -117,13 +117,6 @@ export function getConfig(): PgMemoryConfig {
   return _config;
 }
 
-// 兼容旧导入（指向单例）
-export const CONFIG = new Proxy({} as PgMemoryConfig, {
-  get(_, key: string) {
-    return (getConfig() as any)[key];
-  },
-});
-
 export function isConfigured(): boolean {
   return !!getConfig().pgPassword;
 }
