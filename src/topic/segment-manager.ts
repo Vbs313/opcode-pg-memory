@@ -1,5 +1,8 @@
-import { Pool } from 'pg';
-import { getEmbeddingService, EmbeddingService } from '../utils/embedding';
+import { Pool } from "pg";
+import { getEmbeddingService, EmbeddingService } from "../utils/embedding";
+import { createLogger } from "../services/logger";
+
+const log = createLogger("segment-manager");
 
 // ==================== Types ====================
 
@@ -105,7 +108,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
 function normalizeVector(v: number[]): number[] {
   const norm = Math.sqrt(v.reduce((sum, x) => sum + x * x, 0));
   if (norm === 0) return [...v];
-  return v.map(x => x / norm);
+  return v.map((x) => x / norm);
 }
 
 // ==================== TopicManager ====================
@@ -166,7 +169,8 @@ export class TopicManager {
     this.currentSegment = null;
     this.windowBuffer = [];
     this.windowSize = config?.windowSize ?? DEFAULT_CONFIG.windowSize;
-    this.mutationThreshold = config?.mutationThreshold ?? DEFAULT_CONFIG.mutationThreshold;
+    this.mutationThreshold =
+      config?.mutationThreshold ?? DEFAULT_CONFIG.mutationThreshold;
   }
 
   // ==================== Public Core API ====================
@@ -192,7 +196,7 @@ export class TopicManager {
       return this.createNewSegment(
         this.sessionMapId,
         this.segments.length,
-        event.messageId || 'auto',
+        event.messageId || "auto",
       );
     }
 
@@ -203,11 +207,16 @@ export class TopicManager {
       try {
         embedding = await embService.generateEmbedding(text);
       } catch (err) {
-        console.warn('[TopicManager] Embedding generation failed, using zero vector fallback:', err);
+        console.warn(
+          "[TopicManager] Embedding generation failed, using zero vector fallback:",
+          err,
+        );
         embedding = [];
       }
     } else {
-      console.warn('[TopicManager] EmbeddingService unavailable — topic detection disabled');
+      console.warn(
+        "[TopicManager] EmbeddingService unavailable — topic detection disabled",
+      );
     }
 
     // ── Create first segment if none exists ───────────────────────
@@ -215,12 +224,15 @@ export class TopicManager {
       const seg = await this.createNewSegment(
         this.sessionMapId,
         this.segments.length,
-        event.messageId || 'auto',
+        event.messageId || "auto",
       );
       this.currentSegment = seg;
       this.currentSegment.embedding = embedding;
       if (embedding.length > 0) {
-        this.windowBuffer.push({ messageId: event.messageId || 'auto', embedding });
+        this.windowBuffer.push({
+          messageId: event.messageId || "auto",
+          embedding,
+        });
       }
       return seg;
     }
@@ -231,7 +243,7 @@ export class TopicManager {
     }
 
     // ── Sliding window management ─────────────────────────────────
-    this.windowBuffer.push({ messageId: event.messageId || 'auto', embedding });
+    this.windowBuffer.push({ messageId: event.messageId || "auto", embedding });
     while (this.windowBuffer.length > this.windowSize) {
       this.windowBuffer.shift();
     }
@@ -239,7 +251,7 @@ export class TopicManager {
     // ── Topic boundary detection ──────────────────────────────────
     const centroid = this.currentSegment.embedding;
     if (centroid && centroid.length > 0 && this.windowBuffer.length >= 2) {
-      const similarities = this.windowBuffer.map(item =>
+      const similarities = this.windowBuffer.map((item) =>
         cosineSimilarity(item.embedding, centroid!),
       );
       const avgSimilarity =
@@ -247,29 +259,35 @@ export class TopicManager {
 
       if (avgSimilarity < this.mutationThreshold) {
         // Topic shift detected: close old segment, start new one.
-        const boundaryMessageId = this.windowBuffer[0]?.messageId || event.messageId || 'auto';
+        const boundaryMessageId =
+          this.windowBuffer[0]?.messageId || event.messageId || "auto";
         await this.closeCurrentSegment(boundaryMessageId);
 
         const newSeg = await this.createNewSegment(
           this.sessionMapId,
           this.segments.length,
-          event.messageId || 'auto',
+          event.messageId || "auto",
         );
         this.currentSegment = newSeg;
         this.currentSegment.embedding = embedding;
 
         // Reset window: only the current event belongs to the new segment.
-        this.windowBuffer = [{ messageId: event.messageId || 'auto', embedding }];
+        this.windowBuffer = [
+          { messageId: event.messageId || "auto", embedding },
+        ];
 
         console.log(
           `[TopicManager] Topic shift detected (similarity=${avgSimilarity.toFixed(3)} < ${this.mutationThreshold}), ` +
-          `new segment #${newSeg.segmentIndex} created`,
+            `new segment #${newSeg.segmentIndex} created`,
         );
         return newSeg;
       }
 
       // ── No shift: update segment centroid via moving average ────
-      this.currentSegment.embedding = this.updateSegmentEmbedding(centroid, embedding);
+      this.currentSegment.embedding = this.updateSegmentEmbedding(
+        centroid,
+        embedding,
+      );
     } else if (!centroid || centroid.length === 0) {
       // First meaningful embedding for this segment.
       this.currentSegment.embedding = embedding;
@@ -317,11 +335,11 @@ export class TopicManager {
     const seg = this.currentSegment;
 
     // ── Generate summary ────────────────────────────────────────
-    let summary = '';
+    let summary = "";
     try {
       summary = await this.retrieveSegmentSummary(seg.id);
     } catch (err) {
-      console.warn('[TopicManager] Summary generation failed:', err);
+      console.warn("[TopicManager] Summary generation failed:", err);
       summary = `Segment #${seg.segmentIndex}`;
     }
 
@@ -332,7 +350,10 @@ export class TopicManager {
       try {
         summaryEmbedding = await embService.generateEmbedding(summary);
       } catch (err) {
-        console.warn('[TopicManager] Summary embedding generation failed:', err);
+        console.warn(
+          "[TopicManager] Summary embedding generation failed:",
+          err,
+        );
       }
     }
 
@@ -359,7 +380,9 @@ export class TopicManager {
     seg.closedAt = new Date();
 
     this.currentSegment = null;
-    console.log(`[TopicManager] Closed segment #${seg.segmentIndex}: ${summary}`);
+    console.log(
+      `[TopicManager] Closed segment #${seg.segmentIndex}: ${summary}`,
+    );
   }
 
   /**
@@ -370,7 +393,7 @@ export class TopicManager {
    */
   async closeAllPendingSegments(): Promise<void> {
     if (this.currentSegment) {
-      await this.closeCurrentSegment('session-end');
+      await this.closeCurrentSegment("session-end");
     }
 
     // Update session timestamp (updated_at serves as last_active_at proxy).
@@ -380,7 +403,7 @@ export class TopicManager {
         [this.sessionMapId],
       );
     } catch (err) {
-      console.warn('[TopicManager] Failed to update session timestamp:', err);
+      console.warn("[TopicManager] Failed to update session timestamp:", err);
     }
 
     this.windowBuffer = [];
@@ -419,39 +442,40 @@ export class TopicManager {
       );
 
       if (fallbackResult.rows.length === 0) {
-        return 'Empty segment';
+        return "Empty segment";
       }
 
       const toolNames = [
         ...new Set(
-          fallbackResult.rows
-            .map((r: any) => r.tool_name)
-            .filter(Boolean),
+          fallbackResult.rows.map((r: any) => r.tool_name).filter(Boolean),
         ),
       ];
 
-      return `Topic segment covering ${fallbackResult.rows.length} observations` +
-        (toolNames.length > 0 ? ` using tools: ${toolNames.slice(0, 5).join(', ')}` : '');
+      return (
+        `Topic segment covering ${fallbackResult.rows.length} observations` +
+        (toolNames.length > 0
+          ? ` using tools: ${toolNames.slice(0, 5).join(", ")}`
+          : "")
+      );
     }
 
     const toolNames = [
-      ...new Set(
-        result.rows
-          .map((r: any) => r.tool_name)
-          .filter(Boolean),
-      ),
+      ...new Set(result.rows.map((r: any) => r.tool_name).filter(Boolean)),
     ];
 
     // Heuristic 1-sentence summary.
     let summary = `Topic segment with ${result.rows.length} observations`;
 
     if (toolNames.length > 0) {
-      summary += ` covering: ${toolNames.slice(0, 5).join(', ')}`;
+      summary += ` covering: ${toolNames.slice(0, 5).join(", ")}`;
     }
 
     // Add a hint about the first tool's input for context.
     if (result.rows[0]?.tool_input_summary) {
-      const firstInput = String(result.rows[0].tool_input_summary).substring(0, 80);
+      const firstInput = String(result.rows[0].tool_input_summary).substring(
+        0,
+        80,
+      );
       summary += ` — starts with ${firstInput}`;
     }
 
@@ -482,12 +506,17 @@ export class TopicManager {
     if (sessionResult.rows.length === 0) {
       throw new Error(
         `[TopicManager] Session not found for OpenCode session ID: ${opencodeSessionId}. ` +
-        `Ensure the session has been recorded before creating a TopicManager.`,
+          `Ensure the session has been recorded before creating a TopicManager.`,
       );
     }
 
     const sessionMapId: string = sessionResult.rows[0].id;
-    const manager = new TopicManager(pool, sessionMapId, opencodeSessionId, config);
+    const manager = new TopicManager(
+      pool,
+      sessionMapId,
+      opencodeSessionId,
+      config,
+    );
 
     // Load existing segments from DB.
     const segmentsResult = await pool.query(
@@ -512,7 +541,7 @@ export class TopicManager {
     }));
 
     // Restore currentSegment (the last unclosed segment, if any).
-    const openSegment = manager.segments.find(s => !s.closedAt);
+    const openSegment = manager.segments.find((s) => !s.closedAt);
     if (openSegment) {
       manager.currentSegment = openSegment;
     }
@@ -564,16 +593,19 @@ export class TopicManager {
       let resultStr: string;
 
       if (!event.result.success) {
-        resultStr = event.result.error || 'error';
-      } else if (event.result.data === undefined || event.result.data === null) {
-        resultStr = 'success';
-      } else if (typeof event.result.data === 'string') {
+        resultStr = event.result.error || "error";
+      } else if (
+        event.result.data === undefined ||
+        event.result.data === null
+      ) {
+        resultStr = "success";
+      } else if (typeof event.result.data === "string") {
         resultStr = event.result.data.substring(0, 300);
       } else {
         try {
           resultStr = JSON.stringify(event.result.data).substring(0, 300);
         } catch {
-          resultStr = 'complex data';
+          resultStr = "complex data";
         }
       }
 
@@ -586,12 +618,13 @@ export class TopicManager {
     }
 
     // Direct content field (some message variants).
-    if (typeof (event as any).content === 'string') {
-      return (event as any).content;
+    const eventRecord = event as Record<string, unknown>;
+    if (typeof eventRecord.content === "string") {
+      return eventRecord.content;
     }
 
     // Fallback: event type provides minimal context.
-    return event.type || 'unknown';
+    return event.type || "unknown";
   }
 
   /**
@@ -604,7 +637,10 @@ export class TopicManager {
    *
    * Gracefully handles mismatched vector lengths and null/empty inputs.
    */
-  private updateSegmentEmbedding(current: number[], newEmb: number[]): number[] {
+  private updateSegmentEmbedding(
+    current: number[],
+    newEmb: number[],
+  ): number[] {
     if (!current || current.length === 0) return [...newEmb];
     if (!newEmb || newEmb.length === 0) return [...current];
 

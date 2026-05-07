@@ -22,6 +22,7 @@ import {
 } from "./src/mcp/hindsight-reflect";
 import { importDocument, ImportDocumentInput } from "./src/mcp/import-document";
 import { createLogger } from "./src/services/logger";
+import { classifyError } from "./src/utils/error-classifier";
 
 const logger = createLogger("mcp-server");
 
@@ -324,7 +325,11 @@ async function main() {
       }
       return await handler(args as Record<string, unknown>, pool);
     } catch (error) {
-      logger.error(`Error calling tool ${name}`, error);
+      const classified = classifyError(error);
+      logger.error(
+        `${classified.severity.toUpperCase()} [${classified.category}] ${classified.message}`,
+      );
+      if (classified.suggestion) logger.info(`→ ${classified.suggestion}`);
 
       return {
         content: [
