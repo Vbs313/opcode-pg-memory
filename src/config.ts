@@ -1,13 +1,13 @@
 /**
  * Centralized configuration for pg-memory plugin.
- * 
+ *
  * Priority: env vars > ~/.config/opencode/pg-memory.jsonc > defaults
- * Pattern: follows opencode-supermemory config.ts
+ * Uses Zod for runtime validation + type inference (no manual `as` casts).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { SyncMode } from "./types";
+import { z } from "zod";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
 const CONFIG_FILES = [
@@ -15,100 +15,126 @@ const CONFIG_FILES = [
   join(CONFIG_DIR, "pg-memory.json"),
 ];
 
-// ── Types ──────────────────────────────────────────────
+// ── Zod Schema ────────────────────────────────────────
+// 单一来源：类型由 schema 自动推导，消除 interface + as 双重维护
 
-export interface PgMemoryConfig {
-  pgHost?: string;
-  pgPort?: number;
-  pgDatabase?: string;
-  pgUser?: string;
-  pgPassword?: string;
-  embeddingProvider?: "ollama" | "deepseek" | "openai";
-  embeddingModel?: string;
-  embeddingDimensions?: number;
-  embeddingBatchSize?: number;
-  similarityThreshold?: number;
-  maxMemories?: number;
-  logLevel?: "debug" | "info" | "warn" | "error";
-  compactionThreshold?: number;
-  syncMode?: SyncMode;
-  pollingIntervalMs?: number;
-}
+const SyncModeSchema = z.enum(["hybrid", "polling", "event"]);
 
-// ── Defaults ──────────────────────────────────────────
+export const ConfigSchema = z.object({
+  pgHost: z.string().default("localhost"),
+  pgPort: z.coerce.number().int().min(1).max(65535).default(5432),
+  pgDatabase: z.string().default("PGOMO"),
+  pgUser: z.string().default("opencode"),
+  pgPassword: z.string().default(""),
 
-const DEFAULTS: Required<Omit<PgMemoryConfig, "pgPassword">> = {
-  pgHost: "localhost",
-  pgPort: 5432,
-  pgDatabase: "PGOMO",
-  pgUser: "opencode",
-  embeddingProvider: "ollama",
-  embeddingModel: "qwen3-embedding:0.6b",
-  embeddingDimensions: 1024,
-  embeddingBatchSize: 10,
-  similarityThreshold: 0.6,
-  maxMemories: 10,
-  logLevel: "info",
-  compactionThreshold: 0.80,
-  syncMode: "hybrid",
-  pollingIntervalMs: 5000,
-};
+  embeddingProvider: z.enum(["ollama", "deepseek", "openai"]).default("ollama"),
+  embeddingModel: z.string().default("qwen3-embedding:0.6b"),
+  embeddingDimensions: z.coerce.number().int().positive().default(1024),
+  embeddingBatchSize: z.coerce.number().int().positive().default(10),
 
-// ── Helpers ───────────────────────────────────────────
+  similarityThreshold: z.coerce.number().min(0).max(1).default(0.6),
+  maxMemories: z.coerce.number().int().positive().default(10),
+  logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  compactionThreshold: z.coerce.number().min(0).max(1).default(0.8),
+  syncMode: SyncModeSchema.default("hybrid"),
+  pollingIntervalMs: z.coerce.number().int().positive().default(5000),
+});
+
+export type PgMemoryConfig = z.infer<typeof ConfigSchema>;
+
+// ── Merged Config ─────────────────────────────────────
 
 function stripJsoncComments(content: string): string {
-  return content
-    .replace(/\/\/.*$/gm, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "");
+  return content.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
-function loadFileConfig(): PgMemoryConfig {
+function loadRawFileConfig(): Record<string, unknown> {
   for (const path of CONFIG_FILES) {
     if (existsSync(path)) {
       try {
         const content = readFileSync(path, "utf-8");
-        const json = stripJsoncComments(content);
-        return JSON.parse(json) as PgMemoryConfig;
+        return JSON.parse(stripJsoncComments(content));
       } catch {
-        // invalid config, fall through to defaults
+        // invalid config, fall through
       }
     }
   }
   return {};
 }
 
-const fileConfig = loadFileConfig();
+/**
+ * 构建运行时配置。
+ * 优先级：env var > file config > schema default
+ * 所有值在返回前经过 Zod 解析校验，类型安全。
+ */
+export function buildConfig(): PgMemoryConfig {
+  const fileConfig = loadRawFileConfig();
 
-// ── Exported Config ───────────────────────────────────
+  // 从 process.env 读取所有 PG/EMBEDDING 前缀的环境变量
+  const envRaw: Record<string, string> = {};
+  for (const [key, val] of Object.entries(process.env)) {
+    if (
+      val &&
+      (key.startsWith("PG_") ||
+        key.startsWith("EMBEDDING_") ||
+        key.startsWith("PG_MEMORY_"))
+    ) {
+      // 转小写下划线 → camelCase
+      const parts = key.replace("PG_MEMORY_", "").toLowerCase().split("_");
+      const camel =
+        parts[0] +
+        parts
+          .slice(1)
+          .map((s) => s[0].toUpperCase() + s.slice(1))
+          .join("");
+      envRaw[camel] = val;
+    }
+  }
 
-export const CONFIG = {
-  pgHost: process.env.PG_HOST || fileConfig.pgHost || DEFAULTS.pgHost,
-  pgPort: parseInt(process.env.PG_PORT || String(fileConfig.pgPort || DEFAULTS.pgPort), 10),
-  pgDatabase: process.env.PG_DATABASE || fileConfig.pgDatabase || DEFAULTS.pgDatabase,
-  pgUser: process.env.PG_USER || fileConfig.pgUser || DEFAULTS.pgUser,
-  pgPassword: process.env.PG_PASSWORD || fileConfig.pgPassword || "",
-  embeddingProvider: (process.env.EMBEDDING_PROVIDER || fileConfig.embeddingProvider || DEFAULTS.embeddingProvider) as "ollama" | "deepseek" | "openai",
-  embeddingModel: process.env.EMBEDDING_MODEL || fileConfig.embeddingModel || DEFAULTS.embeddingModel,
-  embeddingDimensions: parseInt(process.env.EMBEDDING_DIMENSIONS || String(fileConfig.embeddingDimensions || DEFAULTS.embeddingDimensions), 10),
-  embeddingBatchSize: parseInt(process.env.EMBEDDING_BATCH_SIZE || String(fileConfig.embeddingBatchSize || DEFAULTS.embeddingBatchSize), 10),
-  similarityThreshold: fileConfig.similarityThreshold ?? DEFAULTS.similarityThreshold,
-  maxMemories: fileConfig.maxMemories ?? DEFAULTS.maxMemories,
-  logLevel: (process.env.PG_MEMORY_LOG_LEVEL || fileConfig.logLevel || DEFAULTS.logLevel) as "debug" | "info" | "warn" | "error",
-  compactionThreshold: fileConfig.compactionThreshold ?? DEFAULTS.compactionThreshold,
-  syncMode: (process.env.PG_MEMORY_SYNC_MODE || fileConfig.syncMode || 'hybrid') as SyncMode,
-  pollingIntervalMs: parseInt(process.env.PG_MEMORY_POLL_INTERVAL || String(fileConfig.pollingIntervalMs || '5000'), 10),
-};
+  // env → file → defaults 三层合并后交由 Zod 解析
+  // Zod schema 已定义每个字段的 default 值
+  const defaults = ConfigSchema.parse({});
+  const merged = { ...defaults, ...fileConfig, ...envRaw };
+  const result = ConfigSchema.safeParse(merged);
+
+  if (!result.success) {
+    console.error("[pg-memory] Config validation errors:");
+    for (const issue of result.error.issues) {
+      console.error(`  ${issue.path.join(".")}: ${issue.message}`);
+    }
+    // 用 Zod 兜底（所有字段都有 default）
+    return ConfigSchema.parse({});
+  }
+
+  return result.data;
+}
+
+// 模块级单例
+let _config: PgMemoryConfig | null = null;
+
+export function getConfig(): PgMemoryConfig {
+  if (!_config) _config = buildConfig();
+  return _config;
+}
+
+// 兼容旧导入（指向单例）
+export const CONFIG = new Proxy({} as PgMemoryConfig, {
+  get(_, key: string) {
+    return (getConfig() as any)[key];
+  },
+});
 
 export function isConfigured(): boolean {
-  return !!CONFIG.pgPassword;
+  return !!getConfig().pgPassword;
 }
 
 export function getDatabaseConfig() {
+  const cfg = getConfig();
   return {
-    host: CONFIG.pgHost,
-    port: CONFIG.pgPort,
-    database: CONFIG.pgDatabase,
-    user: CONFIG.pgUser,
-    password: CONFIG.pgPassword,
+    host: cfg.pgHost,
+    port: cfg.pgPort,
+    database: cfg.pgDatabase,
+    user: cfg.pgUser,
+    password: cfg.pgPassword,
   };
 }
