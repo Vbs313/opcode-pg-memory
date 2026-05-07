@@ -13,6 +13,7 @@ import {
   estimateTokens 
 } from '../utils/token-budget';
 import { createLogger } from '../services/logger';
+import { detectAgentId } from '../services/agent-context';
 
 const logger = createLogger('session-created');
 
@@ -98,17 +99,19 @@ async function upsertSession(
   session: SessionCreatedInput['session'],
   pool: Pool
 ): Promise<void> {
+  const agentId = detectAgentId();
   const query = `
-    INSERT INTO session_map (opencode_session_id, project_id, model_context_limit, metadata)
-    VALUES ($1, $2, $3, $4)
+    INSERT INTO session_map (opencode_session_id, project_id, model_context_limit, metadata, agent_id)
+    VALUES ($1, $2, $3, $4, $5)
     ON CONFLICT (opencode_session_id) 
     DO UPDATE SET 
       project_id = EXCLUDED.project_id,
       model_context_limit = EXCLUDED.model_context_limit,
       last_active_at = NOW(),
-      metadata = session_map.metadata || EXCLUDED.metadata
+      metadata = session_map.metadata || EXCLUDED.metadata,
+      agent_id = COALESCE(session_map.agent_id, EXCLUDED.agent_id)
   `;
-  
+
   await pool.query(query, [
     session.id,
     session.projectId || null,
@@ -116,7 +119,8 @@ async function upsertSession(
     JSON.stringify({
       modelId: session.model.id,
       modelName: session.model.name
-    })
+    }),
+    agentId,
   ]);
 }
 

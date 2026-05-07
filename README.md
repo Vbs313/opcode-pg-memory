@@ -1,6 +1,6 @@
 # opcode-pg-memory
 
-**OpenCode 长期记忆插件** — PostgreSQL + pgvector 四层记忆架构，话题隔离 · Agent 自主调用 · OmO 多 Agent 协调
+**OpenCode 长期记忆插件** — PostgreSQL + pgvector 四层记忆架构，11 Agent 记忆隔离 · 跨会话语义检索 · MCP 工具
 
 [![npm](https://img.shields.io/npm/v/opcode-pg-memory)](https://www.npmjs.com/package/opcode-pg-memory)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
@@ -142,10 +142,10 @@ src/
 ├── db/init-db.ts   # 数据库初始化 + 迁移
 ├── hooks/          # 生命周期钩子
 ├── mcp/            # MCP 工具实现
+├── services/       # Agent 上下文 · 同步管道 · 日志
 ├── topic/          # 话题段管理器
-├── services/       # 日志 · 关键词 · 隐私过滤
 ├── cache/          # 语义缓存
-└── omo/            # OmO 适配器
+└── utils/          # 嵌入生成 · Token 预算
 mcp-server.ts       # MCP 服务入口
 ```
 
@@ -203,7 +203,7 @@ node scripts/backfill-embeddings.js --limit 100
 |------|------|
 | [USAGE_GUIDE.md](./USAGE_GUIDE.md) | 完整使用指南 — 配置 · 工具 · 运维 |
 | [PLUGIN_DOCUMENTATION.md](./PLUGIN_DOCUMENTATION.md) | 架构详解 — 钩子系统 · 数据库设计 |
-| [AGENTS.template.md](./AGENTS.template.md) | AGENTS.md 模板 — OmO directory-agents-injector 自动通知子代理 |
+| [AGENTS.template.md](./AGENTS.template.md) | Agent 记忆使用指南 — 11 Agent 能力表 · 跨 Agent 共享规则 · 环境变量 |
 
 ## License
 

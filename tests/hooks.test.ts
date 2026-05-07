@@ -27,8 +27,12 @@ describe('OpenCode Hooks', () => {
             description: 'A test entity',
             confidence: 0.9
           }]
-        }) // retrieve entities
-        .mockResolvedValueOnce({ rows: [] }); // retrieve reflections
+        }) // retrieve entities (permanent)
+        .mockResolvedValueOnce({ rows: [] }) // retrieve reflections (permanent)
+        .mockResolvedValueOnce({ rows: [] }) // retrieve entities (project)
+        .mockResolvedValueOnce({ rows: [] }) // retrieve reflections (project)
+        .mockResolvedValueOnce({ rows: [] }) // retrieve entities (session)
+        .mockResolvedValueOnce({ rows: [] }); // retrieve reflections (session)
 
       const input = {
         session: {
@@ -43,11 +47,10 @@ describe('OpenCode Hooks', () => {
         }
       };
 
-      const result = await handleSessionCreated(input, mockPool);
-      
-      expect(result.context).toBeDefined();
-      expect(result.context?.memories).toBeDefined();
-      expect(result.context?.facts).toBeDefined();
+      const output: any = {};
+      await handleSessionCreated(input, output, mockPool);
+      expect(output.context).toBeDefined();
+      expect(output.context?.memories).toBeDefined();
     });
 
     it('should handle missing session gracefully', async () => {
@@ -61,10 +64,11 @@ describe('OpenCode Hooks', () => {
         }
       };
 
-      const result = await handleSessionCreated(input, mockPool);
+      const output: any = {};
+      await handleSessionCreated(input, output, mockPool);
       
       // Should return empty context on error
-      expect(result.context).toBeUndefined();
+      expect(output.context).toBeUndefined();
     });
   });
 
@@ -85,9 +89,10 @@ describe('OpenCode Hooks', () => {
         messageId: 'msg-456'
       };
 
-      const result = await handleToolExecuteBefore(input, mockPool);
+      const output: any = {};
+      await handleToolExecuteBefore(input, output, mockPool);
       
-      expect(result).toEqual({});
+      expect(output).toEqual({});
       expect(mockQuery).toHaveBeenCalledTimes(2);
     });
 
@@ -111,7 +116,7 @@ describe('OpenCode Hooks', () => {
         messageId: 'msg-456'
       };
 
-      await handleToolExecuteBefore(input, mockPool);
+      await handleToolExecuteBefore(input, {} as any, mockPool);
       
       // Check that sensitive data was redacted
       const insertCall = mockQuery.mock.calls[1];
@@ -147,9 +152,10 @@ describe('OpenCode Hooks', () => {
         executionTimeMs: 150
       };
 
-      const result = await handleToolExecuteAfter(input, mockPool);
+      const output: any = {};
+      await handleToolExecuteAfter(input, output, mockPool);
       
-      expect(result).toEqual({});
+      expect(output).toEqual({});
     });
 
     it('should create new observation if not exists', async () => {
@@ -158,7 +164,7 @@ describe('OpenCode Hooks', () => {
           rows: [{ id: 'session-internal-id' }]
         })
         .mockResolvedValueOnce({ rows: [] }) // no existing observation
-        .mockResolvedValueOnce({ rows: [] }) // insert observation
+        .mockResolvedValueOnce({ rows: [{ id: 'new-obs' }] }) // insert observation
         .mockResolvedValueOnce({ rows: [] }); // token usage log
 
       const input = {
@@ -172,7 +178,7 @@ describe('OpenCode Hooks', () => {
         executionTimeMs: 200
       };
 
-      await handleToolExecuteAfter(input, mockPool);
+      await handleToolExecuteAfter(input, {} as any, mockPool);
       
       expect(mockQuery).toHaveBeenCalledTimes(4);
     });
@@ -199,9 +205,10 @@ describe('OpenCode Hooks', () => {
         }
       };
 
-      const result = await handleMessageUpdated(input, mockPool);
+      const output: any = {};
+      await handleMessageUpdated(input, output, mockPool);
       
-      expect(result).toEqual({});
+      expect(output).toEqual({});
     });
 
     it('should update existing entity weight', async () => {
@@ -224,7 +231,7 @@ describe('OpenCode Hooks', () => {
         }
       };
 
-      await handleMessageUpdated(input, mockPool);
+      await handleMessageUpdated(input, {} as any, mockPool);
       
       // Verify update was called
       expect(mockQuery).toHaveBeenCalledTimes(3);

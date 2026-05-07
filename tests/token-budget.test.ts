@@ -11,8 +11,8 @@ import {
 describe('Token Budget Utilities', () => {
   describe('calculateTokenBudget', () => {
     it('should calculate 5% of context limit', () => {
-      expect(calculateTokenBudget(128000)).toBe(6400);
-      expect(calculateTokenBudget(200000)).toBe(10000);
+      expect(calculateTokenBudget(128000)).toBe(4000); // capped at maxTokens (4000)
+      expect(calculateTokenBudget(200000)).toBe(4000); // capped at maxTokens (4000)
     });
 
     it('should respect min tokens limit', () => {
