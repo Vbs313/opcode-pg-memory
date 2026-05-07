@@ -207,16 +207,14 @@ export class TopicManager {
       try {
         embedding = await embService.generateEmbedding(text);
       } catch (err) {
-        console.warn(
-          "[TopicManager] Embedding generation failed, using zero vector fallback:",
+        log.warn(
+          "Embedding generation failed, using zero vector fallback:",
           err,
         );
         embedding = [];
       }
     } else {
-      console.warn(
-        "[TopicManager] EmbeddingService unavailable — topic detection disabled",
-      );
+      log.warn("EmbeddingService unavailable — topic detection disabled");
     }
 
     // ── Create first segment if none exists ───────────────────────
@@ -276,9 +274,8 @@ export class TopicManager {
           { messageId: event.messageId || "auto", embedding },
         ];
 
-        console.log(
-          `[TopicManager] Topic shift detected (similarity=${avgSimilarity.toFixed(3)} < ${this.mutationThreshold}), ` +
-            `new segment #${newSeg.segmentIndex} created`,
+        log.info(
+          `Topic shift detected (similarity=${avgSimilarity.toFixed(3)} < ${this.mutationThreshold}), new segment #${newSeg.segmentIndex} created`,
         );
         return newSeg;
       }
@@ -339,7 +336,7 @@ export class TopicManager {
     try {
       summary = await this.retrieveSegmentSummary(seg.id);
     } catch (err) {
-      console.warn("[TopicManager] Summary generation failed:", err);
+      log.warn("Summary generation failed:", err);
       summary = `Segment #${seg.segmentIndex}`;
     }
 
@@ -350,10 +347,7 @@ export class TopicManager {
       try {
         summaryEmbedding = await embService.generateEmbedding(summary);
       } catch (err) {
-        console.warn(
-          "[TopicManager] Summary embedding generation failed:",
-          err,
-        );
+        log.warn("Summary embedding generation failed:", err);
       }
     }
 
@@ -380,9 +374,7 @@ export class TopicManager {
     seg.closedAt = new Date();
 
     this.currentSegment = null;
-    console.log(
-      `[TopicManager] Closed segment #${seg.segmentIndex}: ${summary}`,
-    );
+    log.info(`Closed segment #${seg.segmentIndex}: ${summary}`);
   }
 
   /**
@@ -403,7 +395,7 @@ export class TopicManager {
         [this.sessionMapId],
       );
     } catch (err) {
-      console.warn("[TopicManager] Failed to update session timestamp:", err);
+      log.warn("Failed to update session timestamp:", err);
     }
 
     this.windowBuffer = [];

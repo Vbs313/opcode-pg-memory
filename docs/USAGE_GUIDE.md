@@ -1,4 +1,7 @@
-# opcode-pg-memory v2.2.0 使用指南
+# opcode-pg-memory v2.5.0 使用指南
+
+> ⚠️ 本文档已从 v2.2 更新至 v2.5.0
+> 主要变更：Zod 配置层、错误分类系统、注册表模式派发、import_document 工具
 
 ## 目录
 
