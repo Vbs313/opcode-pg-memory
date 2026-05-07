@@ -21,7 +21,7 @@ export interface SyncHealthOutput {
     sessions_with_obs: number;
   };
   embedder: {
-    queue_length: number;
+    queue_length: number | null;
     cooldown_remaining_s: number | null;
   };
   warnings: string[];
@@ -65,14 +65,14 @@ export async function syncHealth(
     return {
       status: 'error',
       observations: { total: 0, with_embedding: 0, embedding_pct: 0, sessions_with_obs: 0 },
-      embedder: { queue_length: 0, cooldown_remaining_s: null },
+      embedder: { queue_length: null, cooldown_remaining_s: null },
       warnings: ['PG query failed: ' + err.message],
     };
   }
 
   // Embedder stats
   const embedder = getAsyncEmbedder();
-  const queueLength = embedder ? embedder.getQueueLength() : -1;
+  const queueLength = embedder ? embedder.getQueueLength() : null;
   const cooldownUntil = embedder ? embedder.getCooldownUntil() : null;
   const cooldownRemaining = cooldownUntil
     ? Math.max(0, Math.round((cooldownUntil - Date.now()) / 1000))

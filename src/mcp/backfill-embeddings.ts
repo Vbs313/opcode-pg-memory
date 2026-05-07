@@ -4,8 +4,10 @@ import { createLogger } from '../services/logger';
 
 const logger = createLogger('backfill-embeddings');
 
+const BATCH_SIZE = 100;
+
 export interface BackfillEmbeddingsInput {
-  /** Max observations to enqueue. 0 = unlimited. */
+  /** Max observations to enqueue. 0 = unlimited (all pending). */
   limit?: number;
 }
 
@@ -18,6 +20,7 @@ export interface BackfillEmbeddingsOutput {
 
 /**
  * Enqueue observations with NULL embedding into the AsyncEmbedder queue.
+ * Uses cursor-based batching to process large backfills without loading everything at once.
  * The embedder processes them sequentially (with Ollama cooldown/retry).
  * Already-embedded observations are never touched (WHERE embedding IS NULL).
  */
@@ -31,6 +34,9 @@ export async function backfillEmbeddings(
   }
 
   const limit = input.limit || 0;
+  let totalEnqueued = 0;
+  let totalSkipped = 0;
+  let cursor: string | null = null;
 
   try {
     // Count pending
@@ -43,38 +49,61 @@ export async function backfillEmbeddings(
       return { enqueued: 0, skipped: 0, pending: 0, note: 'All observations already have embeddings.' };
     }
 
-    const fetchLimit = limit > 0 ? Math.min(limit, pending) : pending;
+    const maxToProcess = limit > 0 ? Math.min(limit, pending) : pending;
 
-    const result = await pool.query(
-      `SELECT id, tool_name, tool_input_summary, tool_output_summary, importance
-       FROM observations
-       WHERE importance >= 3 AND embedding IS NULL
-       ORDER BY created_at ASC
-       LIMIT $1`,
-      [fetchLimit],
-    );
+    // Cursor-based batch loop
+    while (totalEnqueued < maxToProcess) {
+      const remaining = maxToProcess - totalEnqueued;
+      const batchSize = Math.min(BATCH_SIZE, remaining);
 
-    let enqueuedCount = 0;
-    for (const row of result.rows) {
-      const text = `[${row.tool_name || 'tool'}] ${row.tool_output_summary || row.tool_input_summary || ''}`;
-      if (!text || text.length <= 3) continue;
-      embedder.enqueue('observations', row.id, text, row.importance);
-      enqueuedCount++;
+      let query: string;
+      let params: any[];
+
+      if (cursor) {
+        query = `SELECT id, tool_name, tool_input_summary, tool_output_summary, importance
+                 FROM observations
+                 WHERE importance >= 3 AND embedding IS NULL AND id > $1
+                 ORDER BY id ASC
+                 LIMIT $2`;
+        params = [cursor, batchSize];
+      } else {
+        query = `SELECT id, tool_name, tool_input_summary, tool_output_summary, importance
+                 FROM observations
+                 WHERE importance >= 3 AND embedding IS NULL
+                 ORDER BY id ASC
+                 LIMIT $1`;
+        params = [batchSize];
+      }
+
+      const result = await pool.query(query, params);
+      if (result.rows.length === 0) break;
+
+      for (const row of result.rows) {
+        if (totalEnqueued >= maxToProcess) break;
+
+        const text = `[${row.tool_name || 'tool'}] ${row.tool_output_summary || row.tool_input_summary || ''}`;
+        if (!text || text.length <= 3) {
+          totalSkipped++;
+          continue;
+        }
+        embedder.enqueue('observations', row.id, text, row.importance);
+        totalEnqueued++;
+        cursor = row.id;
+      }
     }
 
-    const skipped = fetchLimit - enqueuedCount;
-    const remaining = pending - enqueuedCount;
+    const remaining = pending - totalEnqueued;
 
-    logger.info(`Backfill: enqueued ${enqueuedCount}, ${remaining} remaining`);
+    logger.info(`Backfill: enqueued ${totalEnqueued}, skipped ${totalSkipped}, ${remaining} remaining`);
 
     return {
-      enqueued: enqueuedCount,
-      skipped,
+      enqueued: totalEnqueued,
+      skipped: totalSkipped,
       pending: remaining,
-      note: `Enqueued ${enqueuedCount} observations. Use sync_health() to monitor progress. Approx ${Math.ceil(remaining * 1.2)}s remaining at current rate.`,
+      note: `Enqueued ${totalEnqueued} observations (${remaining} remaining). Use sync_health() to monitor progress.`,
     };
   } catch (err: any) {
     logger.error('backfill_embeddings query failed', err);
-    return { enqueued: 0, skipped: 0, pending: 0, note: 'Query failed: ' + err.message };
+    return { enqueued: totalEnqueued, skipped: totalSkipped, pending: 0, note: 'Error: ' + err.message };
   }
 }

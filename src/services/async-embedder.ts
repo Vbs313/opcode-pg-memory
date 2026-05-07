@@ -4,6 +4,8 @@ import { createLogger } from './logger';
 
 const logger = createLogger('async-embedder');
 
+const MAX_QUEUE = 5000;
+
 interface EmbeddingJob {
   table: string;
   rowId: string;
@@ -17,6 +19,7 @@ export class AsyncEmbedder {
   private cooldownUntil = 0;
   private readonly cooldownMs: number;
   private readonly minImportance: number;
+  private droppedJobs = 0;
 
   constructor(pool: Pool, config?: { cooldownMs?: number; minImportance?: number }) {
     this.pool = pool;
@@ -32,6 +35,12 @@ export class AsyncEmbedder {
     if (!text || text.length === 0) return;
     if (importance !== undefined && importance < this.minImportance) return;
 
+    if (this.queue.length >= MAX_QUEUE) {
+      this.droppedJobs++;
+      logger.warn(`Embedder queue full (${MAX_QUEUE}), dropping observation ${rowId.substring(0, 8)}`);
+      return;
+    }
+
     this.queue.push({ table, rowId, text });
 
     if (!this.processing) {
@@ -42,6 +51,10 @@ export class AsyncEmbedder {
 
   getQueueLength(): number {
     return this.queue.length;
+  }
+
+  getDroppedCount(): number {
+    return this.droppedJobs;
   }
 
   /**
