@@ -267,9 +267,11 @@ export async function recallMemory(
     });
 
     const retrievalTime = Date.now() - startTime;
-    logger.info(
-      `recall_memory completed: ${results.length} results in ${retrievalTime}ms`,
-    );
+    if (retrievalTime > 1000) {
+      logger.warn(`slow recall_memory: ${results.length} results in ${retrievalTime}ms`);
+    } else {
+      logger.info(`recall_memory completed: ${results.length} results in ${retrievalTime}ms`);
+    }
 
     return {
       query: input.query,
@@ -423,6 +425,7 @@ async function resolveScopeToSessionIds(
         [baseSessionMapId],
       );
       if (taskResult.rows.length === 0 || !taskResult.rows[0].omo_task_id) {
+        logger.warn('scope=task but omo_task_id is NULL, falling back to current session');
         return [baseSessionMapId];
       }
       const omoTaskId = taskResult.rows[0].omo_task_id;
@@ -1176,7 +1179,7 @@ function applyFilters(
  * that share the same tool_name and completed status into single summary entries.
  * Only affects observation-type facts.
  */
-function aggregateConsecutiveSimilar(facts: InternalFact[]): InternalFact[] {
+export function aggregateConsecutiveSimilar(facts: InternalFact[]): InternalFact[] {
   if (facts.length === 0) return facts;
   
   const result: InternalFact[] = [];

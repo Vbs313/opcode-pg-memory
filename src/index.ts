@@ -8,6 +8,8 @@ import { handleSessionCompacting, handleSessionCompacted } from './hooks/session
 import { handleSessionCompleted } from './hooks/session-completed';
 import { recallMemory, RecallMemoryInput } from './mcp/recall-memory';
 import { hindsightReflect } from './mcp/hindsight-reflect';
+import { syncHealth, SyncHealthInput } from './mcp/sync-health';
+import { backfillEmbeddings, BackfillEmbeddingsInput } from './mcp/backfill-embeddings';
 import { createCacheManager, SemanticCacheManager } from './cache/semantic-cache';
 import { createLogger } from './services/logger';
 import { initAsyncEmbedder, getAsyncEmbedder } from './services/async-embedder';
@@ -598,6 +600,28 @@ Call this AFTER completing significant work to extract reusable patterns.
             modelSize: plugin.config.reflection.modelSize as '7b' | '14b' | 'full',
             offPeakHours: plugin.config.reflection.offPeakHours,
           });
+        },
+      },
+
+      sync_health: {
+        description: '返回插件同步健康状态：observation 数量、embedding 覆盖率、embedder 队列状态',
+        args: {},
+        execute: async (args: SyncHealthInput, _context: { client: any; sessionID?: string }) => {
+          return syncHealth(args, pool);
+        },
+      },
+
+      backfill_embeddings: {
+        description: '回填缺失的 embedding：将 embedding IS NULL 且 importance >= 3 的 observation 喂入 AsyncEmbedder 队列',
+        args: {
+          limit: {
+            type: 'number',
+            default: 0,
+            description: '限制处理条数，0=全量',
+          },
+        },
+        execute: async (args: BackfillEmbeddingsInput, _context: { client: any; sessionID?: string }) => {
+          return backfillEmbeddings(args, pool);
         },
       },
     },

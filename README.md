@@ -92,6 +92,37 @@ recall_memory({
 hindsight_reflect({ "omo_task_id": "task_123", "aggregate": true })
 ```
 
+### sync_health
+
+```json
+// 检查同步健康状态（无参数）
+sync_health()
+
+// 返回示例
+{
+  "status": "healthy",
+  "observations": { "total": 9922, "with_embedding": 9922, "embedding_pct": 100, "sessions_with_obs": 272 },
+  "embedder": { "queue_length": 0, "cooldown_remaining_s": null },
+  "warnings": []
+}
+```
+
+Agent 自愈模式：`sync_health` 发现 coverage < 95% → `backfill_embeddings` → `sync_health` 确认恢复。
+
+### backfill_embeddings
+
+```json
+// 回填缺失的 embedding
+backfill_embeddings({ "limit": 100 })
+backfill_embeddings({})  // 全量
+```
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `limit` | `number` | `0`（全量） | 限制处理条数 |
+
+使用 AsyncEmbedder 队列执行，支持 Ollama 不可用时 5 分钟冷却自动续传。已覆盖的 observation（`embedding IS NOT NULL`）不会重复处理。
+
 ## 架构
 
 ```
@@ -148,6 +179,8 @@ node scripts/verify-sync.js
 ```
 
 `verify-sync.js` 是只读脚本，不修改数据库。同步由 EventSynchronizer 自动通过 OpenCode 事件总线或 SQLite 轮询完成。
+
+Agent 可直接调用 `sync_health()` 获取相同信息（`status`、`embedding_pct`、`warnings`）。
 
 ### 批量 embedding 回填
 

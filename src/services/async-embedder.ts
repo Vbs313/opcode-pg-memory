@@ -44,7 +44,18 @@ export class AsyncEmbedder {
     return this.queue.length;
   }
 
+  /**
+   * Returns timestamp (ms) when cooldown expires, or null if not cooling.
+   */
+  getCooldownUntil(): number | null {
+    return this.cooldownUntil > Date.now() ? this.cooldownUntil : null;
+  }
+
   private async drain(): Promise<void> {
+    if (this.queue.length > 50) {
+      logger.warn(`Embedder queue growing (${this.queue.length} pending). Check Ollama connectivity.`);
+    }
+
     while (this.queue.length > 0) {
       // Cooldown check — if Ollama was recently unavailable, wait
       if (Date.now() < this.cooldownUntil) {
@@ -53,14 +64,22 @@ export class AsyncEmbedder {
         continue;
       }
 
-      const job = this.queue.shift()!;
+      // Peek at first item without removing — only shift() on success
+      const job = this.queue[0];
 
       try {
         const service = getEmbeddingService();
-        if (!service) continue;
+        if (!service) {
+          // No embedding backend available, skip remaining queue
+          this.queue = [];
+          break;
+        }
 
         const embedding = await service.generateEmbedding(job.text);
-        if (!embedding || embedding.length === 0) continue;
+        if (!embedding || embedding.length === 0) {
+          this.queue.shift(); // Skip unembeddable item
+          continue;
+        }
 
         // JSON.stringify converts [0.1,0.2,...] → '[0.1,0.2,...]' which is the vector literal format
         // (pg driver serializes raw arrays as {0.1,0.2,...} which ::vector rejects)
@@ -68,13 +87,16 @@ export class AsyncEmbedder {
           `UPDATE ${job.table} SET embedding = $1::vector WHERE id = $2 AND embedding IS NULL`,
           [JSON.stringify(embedding), job.rowId]
         );
+        this.queue.shift(); // Success: remove from queue
       } catch (err: any) {
         const msg = (err.message || '').toLowerCase();
         if (msg.includes('connect') || msg.includes('refused') || msg.includes('econnrefused') || msg.includes('timeout') || msg.includes('fetch')) {
           this.cooldownUntil = Date.now() + this.cooldownMs;
           logger.warn(`Ollama unavailable, cooling down ${this.cooldownMs / 1000}s`);
+          // Item stays in queue — retry after cooldown
         } else {
           logger.warn(`Embedding failed: ${err.message}`);
+          this.queue.shift(); // Non-recoverable: skip this item
         }
       }
     }
