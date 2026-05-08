@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Pool } from "pg";
 import { initializeDatabase, closeDatabase } from "./db/init-db";
 import { handleSessionCreated } from "./hooks/session-created";
@@ -301,6 +302,14 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
   // Track sessions that have received memory injection
   const injectedSessions = new Set<string>();
 
+  // Injection pipeline cache — skip PG query if system prompt hash unchanged
+  // Key: sessionId, Value: { hash of system prompt, cached injection block }
+  const injectionCache = new Map<
+    string,
+    { systemHash: string; block: string; timestamp: number }
+  >();
+  const INJECTION_CACHE_TTL_MS = 60_000; // 1 minute
+
   // ==========================================================================
   // Return hooks object
   // ==========================================================================
@@ -506,6 +515,22 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
           3000,
         );
 
+        // ── Injection cache: skip PG query if system prompt hash unchanged ──
+        const systemHash = createHash("md5")
+          .update(systemContent)
+          .digest("hex");
+        const cached = injectionCache.get(sessionId);
+        if (
+          cached &&
+          cached.systemHash === systemHash &&
+          Date.now() - cached.timestamp < INJECTION_CACHE_TTL_MS
+        ) {
+          if (cached.block) {
+            output.system[0] = systemContent + "\n\n" + cached.block;
+          }
+          return; // Skip PG query entirely
+        }
+
         // Build memory injection block (two-path recall + hybrid scoring)
         const injectionBlock = await buildInjectionBlock(
           {
@@ -527,10 +552,25 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
           },
         );
 
+        // Update cache
+        injectionCache.set(sessionId, {
+          systemHash,
+          block: injectionBlock,
+          timestamp: Date.now(),
+        });
+
         if (injectionBlock) {
           // Merge into the PRIMARY system block — NOT push a new entry.
-          // Single system message is required by vLLM/Qwen backends.
           output.system[0] = systemContent + "\n\n" + injectionBlock;
+
+          // Evict stale cache entries (keep under 50)
+          if (injectionCache.size > 50) {
+            const oldest = [...injectionCache.entries()].sort(
+              ([, a], [, b]) => a.timestamp - b.timestamp,
+            )[0];
+            if (oldest) injectionCache.delete(oldest[0]);
+          }
+
           logger.info(
             `Injected ${estimateTokens(injectionBlock)} tokens of memory context`,
             { sessionID: sessionId },

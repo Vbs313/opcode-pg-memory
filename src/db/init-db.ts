@@ -592,11 +592,15 @@ export class DatabaseInitializer {
       await client.query(`
         ALTER TABLE observations
         ADD COLUMN IF NOT EXISTS source VARCHAR(512),
-        ADD COLUMN IF NOT EXISTS source_hash VARCHAR(64)
+        ADD COLUMN IF NOT EXISTS source_hash VARCHAR(64),
+        ADD COLUMN IF NOT EXISTS platform_source VARCHAR(50) DEFAULT 'opencode',
+        ADD COLUMN IF NOT EXISTS agent_id VARCHAR(100)
       `);
 
-      // 索引在 createIndexes 中已创建（idx_observations_source），无需重复
-      this.logger.info("observations source columns migrated");
+      // 索引在 createIndexes 中已创建，无需重复
+      this.logger.info(
+        "observations columns migrated (source, platform_source, agent_id)",
+      );
     } catch (error) {
       this.logger.warn(
         "Observations source migration warning (non-fatal):",

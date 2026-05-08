@@ -1,6 +1,6 @@
 {
   "name": "opcode-pg-memory",
-  "version": "2.5.0",
+  "version": "3.0.1",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -9,6 +9,8 @@
   "scripts": {
     "build": "tsc && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && bun build ./mcp-server.ts --outfile ./dist/mcp-server.js --target node",
     "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
     "clean": "rimraf dist"
   },
   "keywords": [
@@ -40,6 +42,7 @@
   },
   "files": [
     "dist",
+    "platform-templates",
     "script/migration-v2.sql",
     ".env.example",
     "README.md"

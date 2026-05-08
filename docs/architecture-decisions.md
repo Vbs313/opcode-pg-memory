@@ -1,53 +1,86 @@
-# 新方向：opcode-pg-memory × oh-my-openagent 零侵入确定性闭环
+# 架构决策记录
 
-> 生成日期：2026-05-07 | 基于代码扫描版本：opcode-pg-memory v2.4.3, oh-my-openagent v4.0.0
+> 最后更新: 2026-05-08 | 对应版本: opcode-pg-memory v3.0
 
 ---
 
-## 一、现状诊断（基于代码核实）
+## 已实施的决策
 
-### Plugin SDK 1.4.0 Hooks 验证结果
+### ADR-001: 自动注入使用 `experimental.chat.system.transform`
 
-通过直接读取 `@opencode-ai/plugin@1.4.0` 的类型定义（`dist/index.d.ts:142-268`），确认了以下关键 API 的存在性：
+**状态**: ✅ 已实施 (v3.0)
 
-| 你需要的 API | 实际名称 | 状态 |
-|-|-|-|
-| `session.created` 钩子 | ❌ 不存在 | 但 `experimental.chat.system.transform` 可以替代 |
-| `hooks.transformSystemPrompt` | ❌ 不存在 | **但是** `experimental.chat.system.transform` **等价**——它接收 `{ sessionID, model }`，输出 `{ system: string[] }`，可直接追加到系统提示 |
-| `tool.execute.after` 修改输出 | ✅ **存在** | 接收 `{ tool, sessionID, callID, args }`，输出 `{ title, output, metadata }`——可直接修改 |
-| `tool.execute.before` 修改参数 | ✅ **存在** | 接收 `{ tool, sessionID, callID }`，输出 `{ args }`——可在工具执行前干预 |
+使用 OpenCode 官方 Plugin SDK 的 `experimental.chat.system.transform` 钩子，在每次 LLM 调用前注入记忆。
+记忆合并到 `output.system[0]`（非 `push` 新条目），兼容只接受单条 system message 的 vLLM/Qwen 后端。
 
-**关键发现**：`experimental.chat.system.transform` 钩子直接修改发送给 LLM 的 system prompt——这正是你在找的错误信息注入入口，只是在 Plugin SDK 中名字不同。你不需要依赖 rules-injector 的文件方案。
+### ADR-002: 两路召回 + 混合排序
 
-### 子代理模型问题定位
+**状态**: ✅ 已实施 (v3.0)
 
-所有 `task(subagent_type="explore")` 失败的根因已确认：
+| 路径 | 策略 | 无条件 |
+|------|------|--------|
+| 关键词 | `WHERE project = $1 ORDER BY importance DESC` | ✅ 总是执行 |
+| 语义 | `ORDER BY embedding <=> $query` | 需要 embedding API |
 
-1. 主会话使用 `deepseek:deepseek-v4-flash`（格式：`provider:modelID`）
-2. Background 子代理系统继承 `parentModel`（`create-background-task.ts:59-66`），但子会话**没有 deepseek provider 的 API key 配置**
-3. 系统 fallback 到内建模型（`opencode/gpt-5.5`, `opencode/gemini-3.1-pro` 等），均无 API key → 空输出
+**评分公式**: `score = similarity × 0.5 + importance × 0.3 + recency × 0.2`
 
-### 你已有但没意识到的能力
+### ADR-003: PostgreSQL 作为唯一存储
 
-| 你分析中提到的 | 代码验证结果 |
-|-|-|
-| "Skill 有 on:task_completed 钩子" | ❌ **不存在**。Skills 是 SKILL.md 指令文件，**没有**生命周期钩子。Skills 只是注入给 Agent 看的指令文本，不执行代码 |
-| "Tool.batch 存在性存疑" | ✅ **存在但受限**。OpenCode 内置 `tool.batch`，但只支持内置工具，不支持外部 MCP 工具批量执行 |
-| "opencode-rules 需手动创建" | ✅ **已存在 npm 包** `opencode-rules@0.6.4`，直接安装即可 |
-| "opencode-project-scaffolder 可借鉴" | ❌ **不存在通用脚手架插件** |
+**状态**: ✅ 已实施 (v2.0+)
 
-### oh-my-openagent 实际能用的"接缝"
+所有平台共享同一个 PostgreSQL 数据库。MCP Server 作为唯一的数据访问层，
+其他平台不直接连接数据库。
 
-是的，你不需要改 oh-my-openagent 源代码。v4.0.0 已提供以下可借力的机制：
+### ADR-004: `.env` 迁移到独立数据目录
 
-1. **`rules-injector` 钩子**（`src/hooks/rules-injector/`）：钩入 `tool.execute.after`，监听 `read/write/edit/multiedit` 操作，找到附近 `AGENTS.md` 文件并**直接修改 tool output 注入内容**。这个模式可直接复用。
-2. **`formatter-trigger` 工具**（`src/tools/hashline-edit/formatter-trigger.ts`）：执行格式化命令，但**无去抖，每文件独立执行**。
-3. **OpenCode 插件系统**（`@opencode-ai/plugin`）：你的插件可以通过 `tool.execute.after` 等钩子注册逻辑，直接修改会话上下文。
+**状态**: ✅ 已实施 (v3.0)
 
-### opcode-pg-memory 实际数据库结构
+凭证从插件根目录 `.env` 迁移到 `~/.opencode-pg-memory/.env`。
+配置与凭证分离：`.env` 只存 API keys / DB 密码，非敏感配置走 `settings.json`。
 
-`observations` 表当前列（`src/db/init-db.ts:204-218`）：
+### ADR-005: 4 层配置合并
+
+**状态**: ✅ 已实施 (v3.0)
+
 ```
+process.env → ~/.opencode-pg-memory/settings.json
+  → ~/.config/opencode/pg-memory.jsonc → Zod 默认值
+```
+
+### ADR-006: 子进程环境隔离
+
+**状态**: ✅ 已实施 (v3.0)
+
+`BLOCKED_ENV_VARS` 从子进程环境中删除敏感变量：
+`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `PG_PASSWORD`, `PG_MEMORY_DATA_DIR`
+
+### ADR-007: `strict: true`
+
+**状态**: ✅ 已实施 (v3.0)
+
+TypeScript 从 `"strict": false` + 6 个独立 false flag 改为 `"strict": true`。
+修复 4 处类型错误后，11,400 行代码零类型错误。
+
+### ADR-008: 跨平台 MCP 配置模板
+
+**状态**: ✅ 已实施 (v3.0)
+
+为 Cursor、Windsurf、Claude Code、Continue.dev 生成 MCP 配置模板，
+位于 `platform-templates/` 目录。
+
+---
+
+## 被否决的方案
+
+### 否决: 独立 guard-plugin
+
+在尝试 7 轮迭代后放弃。最终方案：`opencode.jsonc` 的 `formatter` 配置即可实现自动格式化，
+无需独立的 guard-plugin。
+
+### 否决: 用 `session.created` 替代 `experimental.chat.system.transform`
+
+`session.created` 事件没有 `output.system` 可修改对象。
+记忆注入必须通过 `experimental.chat.system.transform`。
 id, session_map_id, topic_segment_id, tool_name,
 tool_input_summary, tool_output_summary, embedding,
 importance, created_at, message_id, metadata

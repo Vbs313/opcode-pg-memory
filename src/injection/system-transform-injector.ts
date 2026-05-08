@@ -13,10 +13,56 @@
  *   score = vector_similarity × 0.5 + importance × 0.3 + recency_boost × 0.2
  */
 
+import crypto from "node:crypto";
 import { Pool } from "pg";
 import { createLogger } from "../services/logger";
 
 const logger = createLogger("system-transform-injector");
+
+// ============================================================
+// Embedding cache — prevent calling external API on every LLM call
+// ============================================================
+
+const embeddingCache = new Map<
+  string,
+  { hash: string; embedding: number[]; timestamp: number }
+>();
+const EMBEDDING_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function getCachedEmbedding(text: string): number[] | null {
+  const hash = crypto.createHash("md5").update(text).digest("hex");
+  const cached = embeddingCache.get(hash);
+  if (cached && Date.now() - cached.timestamp < EMBEDDING_CACHE_TTL_MS) {
+    return cached.embedding;
+  }
+  return null;
+}
+
+function setCachedEmbedding(text: string, embedding: number[]): void {
+  const hash = crypto.createHash("md5").update(text).digest("hex");
+  embeddingCache.set(hash, { hash, embedding, timestamp: Date.now() });
+  // Evict old entries if cache grows too large
+  if (embeddingCache.size > 50) {
+    const oldest = [...embeddingCache.entries()].sort(
+      ([, a], [, b]) => a.timestamp - b.timestamp,
+    )[0];
+    if (oldest) embeddingCache.delete(oldest[0]);
+  }
+}
+
+/**
+ * Estimate how much of the system prompt is "user content" vs "boilerplate instructions".
+ * If the system prompt is mostly Agent instructions and has very little variable content,
+ * skip semantic search entirely (cold start).
+ */
+function hasUserContent(systemPrompt: string): boolean {
+  if (!systemPrompt || systemPrompt.length < 100) return false;
+  // Check if there are memory injections from previous calls
+  if (systemPrompt.includes("<pg_memory>")) return true;
+  // If system prompt is very long, it likely has user content embedded
+  if (systemPrompt.length > 2000) return true;
+  return false;
+}
 
 // ============================================================
 // Types
@@ -213,7 +259,7 @@ async function keywordRecall(
   limit: number,
 ): Promise<MemoryResult[]> {
   if (project) {
-    // Project-scoped: top observations by importance + recency
+    // Project-scoped: top observations by importance + recency, last 90 days
     const { rows } = await pool.query(
       `
       SELECT o.id, o.tool_name, o.tool_input_summary, o.tool_output_summary,
@@ -223,6 +269,7 @@ async function keywordRecall(
       LEFT JOIN session_map sm ON o.session_map_id = sm.id
       WHERE sm.project_id = $1
         AND o.importance >= 2
+        AND o.created_at > NOW() - INTERVAL '90 days'
       ORDER BY o.importance DESC, o.created_at DESC
       LIMIT $2
       `,
@@ -242,7 +289,7 @@ async function keywordRecall(
     });
   }
 
-  // No project: global top observations
+  // No project: global top observations from last 90 days
   const { rows } = await pool.query(
     `
     SELECT o.id, o.tool_name, o.tool_input_summary, o.tool_output_summary,
@@ -251,6 +298,7 @@ async function keywordRecall(
     FROM observations o
     LEFT JOIN session_map sm ON o.session_map_id = sm.id
     WHERE o.importance >= 3
+      AND o.created_at > NOW() - INTERVAL '90 days'
     ORDER BY o.importance DESC, o.created_at DESC
     LIMIT $1
     `,
@@ -397,6 +445,13 @@ async function retrieveSessionSummary(
 async function generateQueryEmbedding(text: string): Promise<number[] | null> {
   if (!text || text.trim().length < 10) return null;
 
+  // ── Check cache first ──
+  const cached = getCachedEmbedding(text);
+  if (cached) {
+    logger.debug("Using cached embedding");
+    return cached;
+  }
+
   try {
     // API keys resolved from config: process.env → .env file → fallback
     const { getConfig, resolveEmbeddingApiKey, resolveConfig } =
@@ -418,12 +473,24 @@ async function generateQueryEmbedding(text: string): Promise<number[] | null> {
     const { OpenAI } = await import("openai");
     const client = new OpenAI({ apiKey, baseURL });
 
-    const response = await client.embeddings.create({
+    // ── Timeout: if embedding takes > 3s, fall back to keyword-only ──
+    const timeoutPromise = new Promise<null>((resolve) =>
+      setTimeout(() => resolve(null), 3000),
+    );
+    const embedPromise = client.embeddings.create({
       model,
-      input: text.substring(0, 8000), // truncate to avoid token limits
+      input: text.substring(0, 8000),
     });
 
-    return response.data[0].embedding;
+    const response = await Promise.race([embedPromise, timeoutPromise]);
+    if (!response) {
+      logger.warn("Embedding timed out (>3s) — using keyword-only recall");
+      return null;
+    }
+
+    const embedding = response.data[0].embedding;
+    setCachedEmbedding(text, embedding);
+    return embedding;
   } catch (err) {
     logger.warn(
       "Embedding generation failed — falling back to keyword-only recall",
@@ -447,23 +514,27 @@ export async function retrieveMemoriesForInjection(
 }> {
   const cfg: InjectionConfig = { ...DEFAULT_INJECTION_CONFIG, ...config };
 
-  // ── Path A: Keyword recall (always) ──
+  // ── Path A: Keyword recall (always, fast, DB-only) ──
   const pathAResults = await keywordRecall(
     pool,
     input.project,
     cfg.keywordLimit,
   );
 
-  // ── Path B: Semantic recall (if embedding available) ──
+  // ── Path B: Semantic recall (skip on cold start, use cache if available) ──
   let pathBResults: MemoryResult[] = [];
-  const embedding = await generateQueryEmbedding(input.systemPrompt);
-  if (embedding) {
-    pathBResults = await semanticRecall(
-      pool,
-      embedding,
-      input.project,
-      cfg.semanticLimit,
-    );
+  if (hasUserContent(input.systemPrompt)) {
+    const embedding = await generateQueryEmbedding(input.systemPrompt);
+    if (embedding) {
+      pathBResults = await semanticRecall(
+        pool,
+        embedding,
+        input.project,
+        cfg.semanticLimit,
+      );
+    }
+  } else {
+    logger.debug("Cold start — skipping semantic recall, keyword only");
   }
 
   // ── Merge & hybrid score ──

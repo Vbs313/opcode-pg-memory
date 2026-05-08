@@ -1,84 +1,109 @@
-# opcode-pg-memory v2.5.0 使用指南
+# opcode-pg-memory v3.0 使用指南
 
-> ⚠️ 本文档已从 v2.2 更新至 v2.5.0
-> 主要变更：Zod 配置层、错误分类系统、注册表模式派发、import_document 工具
+> 更新至 v3.0 | strict:true | 4 层配置合并 | 两路召回注入 | 跨平台 MCP
+
+---
 
 ## 目录
 
 1. [安装](#1-安装)
 2. [配置](#2-配置)
 3. [MCP 工具](#3-mcp-工具)
-4. [话题段系统](#4-话题段系统)
-5. [新功能（v2.2）](#5-新功能)
-6. [运维与监控](#6-运维与监控)
-7. [故障排查](#7-故障排查)
+4. [注入引擎](#4-注入引擎)
+5. [跨平台集成](#5-跨平台集成)
+6. [Token 经济](#6-token-经济)
+7. [运维与监控](#7-运维与监控)
+8. [故障排查](#8-故障排查)
 
 ---
 
 ## 1. 安装
 
-### 方式一：bunx（推荐）
+### 前置条件
+
+| 组件 | 要求 | 验证 |
+|------|------|------|
+| PostgreSQL | 16+（需 pgvector） | `SELECT extname FROM pg_extension WHERE extname='vector'` |
+| Node.js | >= 18 | `node --version` |
+| Ollama（可选） | `qwen3-embedding:0.6b` | `ollama pull qwen3-embedding:0.6b` |
+
+### npm 安装
 
 ```bash
-bunx opcode-pg-memory install
+bun install opcode-pg-memory
 ```
 
-自动完成：注册插件到 `opencode.jsonc` + 创建 `/pg-memory-init` 命令。
-
-### 方式二：GitHub
+### 源码安装
 
 ```bash
 git clone https://github.com/Vbs313/opcode-pg-memory.git
 cd opcode-pg-memory
-cp .env.example .env && notepad .env
-.\scripts\setup.ps1
+bun run build
 ```
 
-### 前置条件
+### 初始化数据库
 
-| 组件 | 要求 |
-|------|------|
-| PostgreSQL | 16+（需 pgvector） |
-| Bun | 1.0+ |
-| Ollama | `qwen3-embedding:0.6b`（或 DeepSeek/OpenAI API） |
+插件首次启动时自动创建所有表结构。如需手动初始化：
 
-### 注册 MCP
+```bash
+psql -U opencode -d PGOMO -f script/migration-v2.sql
+```
+
+### 注册到 OpenCode
 
 `~/.config/opencode/opencode.jsonc`：
 
 ```jsonc
 {
+  "plugin": [
+    "opcode-pg-memory"
+  ],
   "mcp": {
     "pg-memory": {
       "type": "local",
       "command": ["bun", "path/to/opcode-pg-memory/dist/mcp-server.js"],
       "enabled": true,
       "environment": {
-        "PG_HOST": "localhost", "PG_PORT": "5432",
-        "PG_DATABASE": "PGOMO", "PG_USER": "opencode",
+        "PG_HOST": "localhost",
+        "PG_PORT": "5432",
+        "PG_DATABASE": "PGOMO",
+        "PG_USER": "opencode",
         "PG_PASSWORD": "你的密码",
-        "EMBEDDING_PROVIDER": "ollama",
-        "EMBEDDING_MODEL": "qwen3-embedding:0.6b",
-        "EMBEDDING_DIMENSIONS": "1024"
+        "PG_MEMORY_PLATFORM": "opencode"
       }
     }
   }
 }
 ```
 
-验证：`opencode --print-logs --log-level INFO | findstr "PG Memory"` → `Plugin initialized successfully`
+验证：OpenCode 启动日志出现 `[PG Memory] Plugin initialized successfully`。
 
 ---
 
 ## 2. 配置
 
-### 配置优先级
+### 4 层配置优先级
 
 ```
-MCP environment > ~/.config/opencode/pg-memory.jsonc > 默认值
+① process.env (MCP environment 注入)
+② ~/.opencode-pg-memory/.env (凭证)
+③ ~/.config/opencode/pg-memory.jsonc (OpenCode 全局)
+④ 硬编码默认值 (Zod schema)
 ```
 
-### 配置文件（可选）
+### 凭证文件
+
+创建 `~/.opencode-pg-memory/.env`（优先使用 MCP `environment` 块也可以）：
+
+```bash
+PG_HOST=localhost
+PG_PORT=5432
+PG_DATABASE=PGOMO
+PG_USER=opencode
+PG_PASSWORD=your_password
+```
+
+### 配置文件
 
 创建 `~/.config/opencode/pg-memory.jsonc`：
 
@@ -93,32 +118,21 @@ MCP environment > ~/.config/opencode/pg-memory.jsonc > 默认值
   // 日志级别: debug | info | warn | error
   "logLevel": "info",
 
-  // 上下文压缩阈值 (0-1)
-  "compactionThreshold": 0.85
+  // 自动清理低质量 observation
+  "cleanupEnabled": true,
+
+  // 平台标识
+  "platform": "opencode"
 }
-```
-
-### 环境变量
-
-```bash
-PG_MEMORY_LOG_LEVEL=info     # 日志级别（覆盖配置文件）
-PG_HOST=localhost             # PostgreSQL 主机
-PG_PORT=5432
-PG_DATABASE=PGOMO
-PG_USER=opencode
-PG_PASSWORD=123456
-EMBEDDING_PROVIDER=ollama
-EMBEDDING_MODEL=qwen3-embedding:0.6b
-EMBEDDING_DIMENSIONS=1024    # 必须与模型一致！
 ```
 
 ### 嵌入模型
 
 | Provider | 模型 | 维度 | 备注 |
 |----------|------|------|------|
-| `ollama` | `qwen3-embedding:0.6b` | **1024** | 本地免费 |
-| `deepseek` | `text-embedding-v2` | **1536** | API Key |
-| `openai` | `text-embedding-3-small` | **1536** | API Key |
+| `ollama` | `qwen3-embedding:0.6b` | **1024** | 本地免费，推荐 |
+| `deepseek` | `text-embedding-v2` | **1536** | 需 API Key |
+| `openai` | `text-embedding-3-small` | **1536** | 需 API Key |
 
 ---
 
@@ -128,127 +142,139 @@ EMBEDDING_DIMENSIONS=1024    # 必须与模型一致！
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `query` | string ✅ | 查询文本 |
-| `caller_context` | object | `{type, current_goal, current_session_id}` — 启用话题融合 |
-| `topic_segment_id` | string | 限定话题段 |
-| `retrieval_strategies` | string[] | `semantic`/`bm25`/`graph`/`keyword`/`temporal` |
-| `max_results` | number | 默认 10 |
-| `filters` | object | `{min_confidence, tier, entity_types, exclude_topic_segment_ids, time_range_days}` |
+| `query` | string | 检索查询文本 |
+| `scope` | `session\|task\|project` | 检索范围，默认 `session` |
+| `retrieval_strategies` | array | `semantic`, `bm25`, `graph`, `keyword` |
+| `max_results` | number | 最大结果数，默认 10 |
 
-```json
-// Agent 自主调用
-recall_memory({
-  "query": "数据库连接池配置",
-  "caller_context": { "type": "omo_agent", "current_goal": "性能调优" },
-  "retrieval_strategies": ["semantic", "graph"],
-  "filters": { "tier": "project", "time_range_days": 90 }
-})
-```
-
-### hindsight_reflect — 反思
+### hindsight_reflect — 会话反思
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `session_id` / `omo_task_id` / `topic_segment_id` | string ① | 三选一 |
-| `aggregate` | boolean | `true`=合并所有段反思 |
-| `model_size` | string | `7b`/`14b`/`full` |
-| `observation_threshold` | number | 触发阈值（默认 30） |
+| `session_id` | string | 指定会话 ID |
+| `trigger_type` | `threshold\|scheduled\|manual` | 触发类型 |
 
-```json
-hindsight_reflect({ "session_id": "ses_abc" })
-hindsight_reflect({ "omo_task_id": "task_123", "aggregate": true })
+### import_document — 文档导入
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `source` | string | 文档唯一标识 |
+| `content` | string | 文档内容（纯文本） |
+| `chunk_size` | number | 分块大小，默认 1500 |
+
+---
+
+## 4. 注入引擎
+
+v3.0 核心功能：每次 LLM 调用前，通过 `experimental.chat.system.transform` 自动注入相关记忆。
+
+### 两路召回
+
+```
+路径 A (关键词): 当前项目的高重要性 observation
+路径 B (语义):   pgvector ANN，以 system prompt 为 query
+
+合并 → 混合排序 → 去重 → TokenBudget → 注入 system[0]
+```
+
+### 注入格式
+
+```xml
+<pg_memory>
+project: my-project
+
+<session_context>
+request: Fix database connection pool
+learned: Connection pool size should be based on max connections
+</session_context>
+
+<relevant_memories>
+- [OBSERVATION] (85%) [bash]: input: psql -c "SHOW max_connections"
+- [REFLECTION] (72%) pattern: connection-pool-tuning: Increase pool...
+</relevant_memories>
+</pg_memory>
+```
+
+记忆被合并到 `output.system[0]`（非 push 新条目），兼容只接受单条 system message 的 vLLM/Qwen 后端。
+
+---
+
+## 5. 跨平台集成
+
+所有平台共享同一个 PostgreSQL 数据库，通过 MCP 协议通信。
+
+| 平台 | 配置文件 | 参考模板 |
+|------|----------|----------|
+| **OpenCode** | `opencode.jsonc` plugin + MCP | 内置 |
+| **Claude Code** | `CLAUDE.md` 或 `~/.claude/settings.json` | `platform-templates/claude-code-mcp.md` |
+| **Cursor** | `.cursor/mcp.json` | `platform-templates/cursor-mcp.json` |
+| **Windsurf** | `.windsurf/mcp.json` | `platform-templates/windsurf-mcp.json` |
+| **Continue.dev** | `~/.continue/config.json` | `platform-templates/continue-config.json` |
+
+MCP 服务器支持两种模式：
+
+```bash
+# stdio（内嵌，默认）
+node dist/mcp-server.js
+
+# SSE（独立进程，所有平台可连）
+node dist/mcp-server.js --transport sse --port 37777
 ```
 
 ---
 
-## 4. 话题段系统
+## 6. Token 经济
 
-插件自动检测会话内话题切换，隔离不同话题的实体和观察。
+系统自动追踪记忆的 Token 成本和节省：
 
-```
-会话 ses_abc:
-├── 段 #1 "Docker 网络" (15 条) → 实体: iptables, docker0
-├── 段 #2 "CSS Grid"   (8 条)  → 实体: .container, grid
-└── 段 #3 "服务器部署"  (12 条) → 反思: "systemd service 需 After=network.target"
-```
+| 指标 | 说明 |
+|------|------|
+| `read_tokens` | 读取记忆消耗的 Token |
+| `discovery_tokens` | 如果不存记忆需要重新探索的 Token |
+| `savings_estimate` | 节省的 Token 数 |
+| `avg_importance` | 记忆平均质量分 (1-5) |
 
-算法：滑动窗口（3 条消息）+ 余弦相似度（阈值 0.3）。短消息（< 10 字符）跳过。
+### 自动清理
 
----
-
-## 5. 新功能（v2.2）
-
-### 5.1 首条消息记忆注入
-
-每个新会话的首条消息自动注入历史记忆块：
-
-```
-[PG MEMORY]
-Relevant context from previous sessions:
-- [ENTITY] buildCommand (permanent): npm run build (95%)
-- [OBSERVATION] Build takes ~45s with 8GB RAM (project)
-- [REFLECTION] Test before build to catch errors early (confidence: 0.85)
-```
-
-### 5.2 关键词检测
-
-当用户消息包含 "remember this"、"save this"、"don't forget" 等关键词时，自动提示保存记忆。
-
-### 5.3 隐私过滤
-
-工具输入输出中的 `<private>...</private>` 标记自动替换为 `[REDACTED]`。
-
-### 5.4 Compaction Toast
-
-上下文压缩时自动显示 TUI 通知。
-
-### 5.5 配置集中化
-
-`~/.config/opencode/pg-memory.jsonc` 集中管理所有配置，支持 JSONC 注释。
+低价值 observation（importance ≤ 2、无内容、无 embedding）会在 7 天后自动删除。
 
 ---
 
-## 6. 运维与监控
+## 7. 运维与监控
+
+### PostgreSQL 维护
 
 ```sql
--- 会话统计
-SELECT sm.opencode_session_id,
-  COUNT(ts.id) AS segments,
-  SUM(ts.observation_count) AS total_obs
-FROM session_map sm
-LEFT JOIN topic_segments ts ON ts.session_map_id = sm.id
-GROUP BY sm.opencode_session_id
-ORDER BY total_obs DESC LIMIT 20;
+-- 查看向量索引状态
+SELECT * FROM pg_indexes WHERE tablename = 'observations';
 
--- 实体分布
-SELECT tier, COUNT(*), ROUND(AVG(weight), 2) FROM entities GROUP BY tier;
+-- 统计记忆数量
+SELECT platform_source, COUNT(*) FROM observations GROUP BY 1;
 
--- 缓存命中率
-SELECT COUNT(*) FILTER (WHERE hit_count > 1) AS hits, COUNT(*) AS total
-FROM semantic_cache WHERE is_pruned = FALSE;
-
--- 最近反思
-SELECT summary, confidence, pattern_type, created_at
-FROM reflections ORDER BY created_at DESC LIMIT 10;
-
--- 数据库维护
-VACUUM ANALYZE entities;
-VACUUM ANALYZE observations;
-VACUUM ANALYZE semantic_cache;
+-- 查看 Token 经济
+SELECT * FROM token_economics ORDER BY calculated_at DESC LIMIT 10;
 ```
 
+### 日志
+
+日志输出到 stderr，格式：
+
+```
+[PG Memory] [INFO] [system-transform-injector] Injected 320 tokens of memory context
+[PG Memory] [WARN] [session-summary-writer] No session_map entry for xxx
+[PG Memory] [ERROR] [env-manager] Failed to read .env file
+```
+
+日志级别通过 `PG_MEMORY_LOG_LEVEL` 控制：`debug | info | warn | error`。
+
 ---
 
-## 7. 故障排查
+## 8. 故障排查
 
-| 问题 | 诊断 |
-|------|------|
-| 新会话未入库 | `opencode --print-logs --log-level DEBUG \| findstr "PG Memory"` |
-| 嵌入失败 | `ollama list`；`ollama run qwen3-embedding:0.6b "test"` |
-| PG 连接失败 | `psql -h localhost -U opencode -d PGOMO -c "SELECT 1"` |
-| 话题段未创建 | 单话题会话只有 1 段；`SELECT * FROM topic_segments` |
-| 日志不输出 | `PG_MEMORY_LOG_LEVEL=debug opencode ...` |
-
----
-
-**版本**: 2.2.0 | **更新**: 2026-05-06 | [GitHub](https://github.com/Vbs313/opcode-pg-memory)
+| 现象 | 原因 | 解决 |
+|------|------|------|
+| `ECONNREFUSED` | PostgreSQL 未运行 | `pg_isready` 检查 |
+| `relation "observations" does not exist` | 数据库未初始化 | 插件首次启动自动建表，或手动运行 `script/migration-v2.sql` |
+| `Model not found: xxx` | Provider API key 未配置 | 检查 `~/.opencode-pg-memory/.env` |
+| 无记忆注入 | `experimental.chat.system.transform` 未注册 | 确认 `opencode.jsonc` plugin 列表包含 `opcode-pg-memory` |
+| `output.system[0]` 为空 | 配置层未读取到数据 | 检查 `PG_MEMORY_LOG_LEVEL=debug` 查看详细日志 |
