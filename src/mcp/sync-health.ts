@@ -1,8 +1,8 @@
-import { Pool } from 'pg';
-import { getAsyncEmbedder } from '../services/async-embedder';
-import { createLogger } from '../services/logger';
+import { Pool } from "pg";
+import { getAsyncEmbedder } from "../services/async-embedder";
+import { createLogger } from "../services/logger";
 
-const logger = createLogger('sync-health');
+const logger = createLogger("sync-health");
 
 // ============================================================
 // Public input / output interfaces
@@ -13,7 +13,7 @@ export interface SyncHealthInput {
 }
 
 export interface SyncHealthOutput {
-  status: 'healthy' | 'degraded' | 'error';
+  status: "healthy" | "degraded" | "error";
   observations: {
     total: number;
     with_embedding: number;
@@ -61,12 +61,17 @@ export async function syncHealth(
     `);
     sessionsWithObs = sessionResult.rows[0]?.cnt || 0;
   } catch (err: any) {
-    logger.error('sync_health PG query failed', err);
+    logger.error("sync_health PG query failed", err);
     return {
-      status: 'error',
-      observations: { total: 0, with_embedding: 0, embedding_pct: 0, sessions_with_obs: 0 },
+      status: "error",
+      observations: {
+        total: 0,
+        with_embedding: 0,
+        embedding_pct: 0,
+        sessions_with_obs: 0,
+      },
       embedder: { queue_length: null, cooldown_remaining_s: null },
-      warnings: ['PG query failed: ' + err.message],
+      warnings: ["PG query failed: " + err.message],
     };
   }
 
@@ -79,19 +84,21 @@ export async function syncHealth(
     : null;
 
   // Warnings
-  const embeddingPct = total > 0 ? Math.round((withEmb / total) * 10000) / 100 : 0;
+  const embeddingPct =
+    total > 0 ? Math.round((withEmb / total) * 10000) / 100 : 0;
   if (embeddingPct < 95) {
     warnings.push(
       `Embedding coverage below 95% (${total - withEmb} missing). Run: node scripts/backfill-embeddings.js`,
     );
   }
-  if (queueLength > 50) {
+  if ((queueLength ?? 0) > 50) {
     warnings.push(
       `Embedder queue growing (${queueLength} pending). Check Ollama connectivity.`,
     );
   }
 
-  const status: 'healthy' | 'degraded' = warnings.length === 0 ? 'healthy' : 'degraded';
+  const status: "healthy" | "degraded" =
+    warnings.length === 0 ? "healthy" : "degraded";
 
   return {
     status,

@@ -1,6 +1,7 @@
-import { Pool, PoolClient } from 'pg';
-import pgvector from 'pgvector';
-import { createLogger } from '../services/logger';
+import { Pool, PoolClient } from "pg";
+import pgvector from "pgvector";
+import { createLogger } from "../services/logger";
+import { getConfig } from "../config";
 
 export interface DatabaseConfig {
   host: string;
@@ -13,19 +14,19 @@ export interface DatabaseConfig {
 }
 
 export const DEFAULT_DB_CONFIG: DatabaseConfig = {
-  host: process.env.PG_HOST || 'localhost',
-  port: parseInt(process.env.PG_PORT || '5432', 10),
-  database: process.env.PG_DATABASE || 'opencode_memory',
-  user: process.env.PG_USER || 'opencode',
-  password: process.env.PG_PASSWORD || '',
-  ssl: process.env.PG_SSL === 'true',
-  maxConnections: parseInt(process.env.PG_MAX_CONNECTIONS || '20', 10)
+  host: "localhost",
+  port: 5432,
+  database: "PGOMO",
+  user: "opencode",
+  password: "",
+  ssl: false,
+  maxConnections: 20,
 };
 
 export class DatabaseInitializer {
   private pool: Pool | null = null;
   private config: DatabaseConfig;
-  private logger = createLogger('init-db');
+  private logger = createLogger("init-db");
 
   constructor(config: Partial<DatabaseConfig> = {}) {
     this.config = { ...DEFAULT_DB_CONFIG, ...config };
@@ -43,7 +44,7 @@ export class DatabaseInitializer {
       user: this.config.user,
       password: this.config.password,
       ssl: this.config.ssl,
-      max: this.config.maxConnections
+      max: this.config.maxConnections,
     });
 
     // 注册 pgvector 类型
@@ -62,11 +63,11 @@ export class DatabaseInitializer {
   private async testConnection(): Promise<void> {
     try {
       const client = await this.pool!.connect();
-      const result = await client.query('SELECT NOW() as now');
+      const result = await client.query("SELECT NOW() as now");
       client.release();
-      this.logger.info('Database connected:', result.rows[0].now);
+      this.logger.info("Database connected:", result.rows[0].now);
     } catch (error) {
-      this.logger.error('Database connection failed:', error);
+      this.logger.error("Database connection failed:", error);
       throw new Error(`Failed to connect to PostgreSQL: ${error}`);
     }
   }
@@ -74,7 +75,7 @@ export class DatabaseInitializer {
   private async setupDatabase(): Promise<void> {
     const client = await this.pool!.connect();
     try {
-      await client.query('BEGIN');
+      await client.query("BEGIN");
 
       // 1. 启用 pgvector 扩展
       await this.createExtensions(client);
@@ -97,14 +98,14 @@ export class DatabaseInitializer {
       // 6. 迁移 observations 表新增列（source, source_hash）
       await this.migrateObservationsSource(client);
 
-    // 7. 初始化 OmO 适配 Schema（如果启用）
+      // 7. 初始化 OmO 适配 Schema（如果启用）
       await this.initializeOmOSchema(client);
 
-      await client.query('COMMIT');
-      this.logger.info('Database schema initialized successfully');
+      await client.query("COMMIT");
+      this.logger.info("Database schema initialized successfully");
     } catch (error) {
-      await client.query('ROLLBACK');
-      this.logger.error('Database setup failed:', error);
+      await client.query("ROLLBACK");
+      this.logger.error("Database setup failed:", error);
       throw error;
     } finally {
       client.release();
@@ -116,7 +117,7 @@ export class DatabaseInitializer {
       CREATE EXTENSION IF NOT EXISTS vector;
       CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
     `);
-    this.logger.info('Extensions created');
+    this.logger.info("Extensions created");
   }
 
   private async createEnums(client: PoolClient): Promise<void> {
@@ -132,7 +133,7 @@ export class DatabaseInitializer {
         END IF;
       END $$;
     `);
-    this.logger.info('Enums created');
+    this.logger.info("Enums created");
   }
 
   private async createTables(client: PoolClient): Promise<void> {
@@ -203,6 +204,33 @@ export class DatabaseInitializer {
       );
     `);
 
+    // ── session_summaries 表（跨平台会话摘要：参考 claude-mem session_summaries） ──
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS session_summaries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        opencode_session_id VARCHAR(255) NOT NULL,
+        project_id VARCHAR(255),
+        platform_source VARCHAR(50) NOT NULL DEFAULT 'opencode',
+        request TEXT,
+        investigated TEXT,
+        learned TEXT,
+        completed TEXT,
+        next_steps TEXT,
+        summary_embedding vector(1536),
+        token_count INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_session_summaries_session
+        ON session_summaries(opencode_session_id);
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_session_summaries_project
+        ON session_summaries(project_id);
+    `);
+
     // ── observations 表 ──
     await client.query(`
       CREATE TABLE IF NOT EXISTS observations (
@@ -218,8 +246,14 @@ export class DatabaseInitializer {
         message_id VARCHAR(255),
         metadata JSONB DEFAULT '{}',
         source VARCHAR(512),
-        source_hash VARCHAR(64)
+        source_hash VARCHAR(64),
+        platform_source VARCHAR(50) DEFAULT 'opencode',
+        agent_id VARCHAR(100)
       );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_observations_platform_source
+        ON observations(platform_source);
     `);
 
     // ── reflections 表 ──
@@ -294,7 +328,26 @@ export class DatabaseInitializer {
       );
     `);
 
-    this.logger.info('Tables created');
+    // ── token_economics 表（会话级别 Token 经济统计） ──
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS token_economics (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_map_id UUID REFERENCES session_map(id) ON DELETE CASCADE,
+        total_observations INTEGER DEFAULT 0,
+        avg_importance FLOAT DEFAULT 0,
+        estimated_read_tokens INTEGER DEFAULT 0,
+        estimated_discovery_tokens INTEGER DEFAULT 0,
+        savings_estimate INTEGER DEFAULT 0,
+        calculated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(session_map_id)
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_token_economics_calculated
+        ON token_economics(calculated_at DESC);
+    `);
+
+    this.logger.info("Tables created");
   }
 
   private async createIndexes(client: PoolClient): Promise<void> {
@@ -429,31 +482,44 @@ export class DatabaseInitializer {
       DROP INDEX IF EXISTS idx_token_usage_session;
     `);
 
-    this.logger.info('Indexes created');
+    this.logger.info("Indexes created");
   }
 
   /**
    * 迁移旧列名 session_id → session_map_id
-   * 
+   *
    * 兼容从 v1.x 升级的场景：旧 schema 中 entities/observations 等子表
    * 使用 session_id 列名，但新 schema 使用 session_map_id。
    * 重命名是 PostgreSQL 元数据操作，不重写数据行，FK 关联自动继承新列名。
    */
   private async migrateLegacyColumnNames(client: PoolClient): Promise<void> {
-    const tables = ['entities', 'observations', 'relations', 'reflections',
-      'semantic_cache', 'token_usage_log', 'reflection_errors'];
+    const tables = [
+      "entities",
+      "observations",
+      "relations",
+      "reflections",
+      "semantic_cache",
+      "token_usage_log",
+      "reflection_errors",
+    ];
 
     for (const table of tables) {
       try {
         // 检查表是否存在且包含旧列名 session_id 但不含 session_map_id
-        const hasOld = await client.query(`
+        const hasOld = await client.query(
+          `
           SELECT 1 FROM information_schema.columns
           WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'session_id'
-        `, [table]);
-        const hasNew = await client.query(`
+        `,
+          [table],
+        );
+        const hasNew = await client.query(
+          `
           SELECT 1 FROM information_schema.columns
           WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'session_map_id'
-        `, [table]);
+        `,
+          [table],
+        );
 
         if (hasOld.rows.length > 0 && hasNew.rows.length === 0) {
           await client.query(`
@@ -466,7 +532,7 @@ export class DatabaseInitializer {
         this.logger.info(`Skipped column rename for ${table}: ${err}`);
       }
     }
-    this.logger.info('Legacy column migration complete');
+    this.logger.info("Legacy column migration complete");
   }
 
   /**
@@ -483,7 +549,7 @@ export class DatabaseInitializer {
       `);
 
       if (exists.rows.length === 0) {
-        this.logger.info('No legacy sessions table found, skipping migration');
+        this.logger.info("No legacy sessions table found, skipping migration");
         return;
       }
 
@@ -499,9 +565,9 @@ export class DatabaseInitializer {
         ON CONFLICT (opencode_session_id) DO NOTHING;
       `);
 
-      this.logger.info('Legacy sessions data migrated to session_map');
+      this.logger.info("Legacy sessions data migrated to session_map");
     } catch (error) {
-      this.logger.warn('Sessions migration warning (non-fatal):', error);
+      this.logger.warn("Sessions migration warning (non-fatal):", error);
     }
   }
 
@@ -517,7 +583,9 @@ export class DatabaseInitializer {
         WHERE table_schema = 'public' AND table_name = 'observations'
       `);
       if (tableExists.rows.length === 0) {
-        this.logger.info('observations table not found, skipping source migration');
+        this.logger.info(
+          "observations table not found, skipping source migration",
+        );
         return;
       }
 
@@ -528,26 +596,33 @@ export class DatabaseInitializer {
       `);
 
       // 索引在 createIndexes 中已创建（idx_observations_source），无需重复
-      this.logger.info('observations source columns migrated');
+      this.logger.info("observations source columns migrated");
     } catch (error) {
-      this.logger.warn('Observations source migration warning (non-fatal):', error);
+      this.logger.warn(
+        "Observations source migration warning (non-fatal):",
+        error,
+      );
     }
   }
 
   private async initializeOmOSchema(client: PoolClient): Promise<void> {
     // 检查是否需要 OmO 支持
-    const omOEnabled = process.env.OMO_ENABLED === 'true' ||
-                       process.env.OMO_INTEGRATION === 'enabled';
+    const omOEnabled = getConfig().omoEnabled;
 
     if (!omOEnabled) {
-      this.logger.info('OmO integration not enabled, skipping OmO schema');
+      this.logger.info("OmO integration not enabled, skipping OmO schema");
       return;
     }
 
-    this.logger.info('Initializing OmO schema...');
+    this.logger.info("Initializing OmO schema...");
 
     // 1. 添加 source_agent 字段到相关表
-    const tablesWithAgent = ['observations', 'semantic_cache', 'entities', 'reflections'];
+    const tablesWithAgent = [
+      "observations",
+      "semantic_cache",
+      "entities",
+      "reflections",
+    ];
 
     for (const table of tablesWithAgent) {
       try {
@@ -614,20 +689,20 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_omo_wisdom_type ON omo_wisdom(type)
     `);
 
-    this.logger.info('OmO schema initialized');
+    this.logger.info("OmO schema initialized");
   }
 
   async close(): Promise<void> {
     if (this.pool) {
       await this.pool.end();
       this.pool = null;
-      this.logger.info('Database connection closed');
+      this.logger.info("Database connection closed");
     }
   }
 
   getPool(): Pool {
     if (!this.pool) {
-      throw new Error('Database not initialized. Call initialize() first.');
+      throw new Error("Database not initialized. Call initialize() first.");
     }
     return this.pool;
   }
@@ -636,14 +711,18 @@ export class DatabaseInitializer {
 // 单例导出
 let initializer: DatabaseInitializer | null = null;
 
-export function getDatabaseInitializer(config?: Partial<DatabaseConfig>): DatabaseInitializer {
+export function getDatabaseInitializer(
+  config?: Partial<DatabaseConfig>,
+): DatabaseInitializer {
   if (!initializer) {
     initializer = new DatabaseInitializer(config);
   }
   return initializer;
 }
 
-export async function initializeDatabase(config?: Partial<DatabaseConfig>): Promise<Pool> {
+export async function initializeDatabase(
+  config?: Partial<DatabaseConfig>,
+): Promise<Pool> {
   const init = getDatabaseInitializer(config);
   return init.initialize();
 }

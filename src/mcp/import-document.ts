@@ -15,12 +15,13 @@
  * 该工具提供给 oh-my-openagent 的 skill-mcp-manager 调用。
  */
 
-import { Pool } from 'pg';
-import { createHash } from 'crypto';
-import { createLogger } from '../services/logger';
-import { getEmbeddingService, EmbeddingService } from '../utils/embedding';
+import { Pool } from "pg";
+import { createHash } from "crypto";
+import { createLogger } from "../services/logger";
+import { getEmbeddingService } from "../utils/embedding";
+import { getConfig } from "../config";
 
-const logger = createLogger('import-document');
+const logger = createLogger("import-document");
 
 // ── 公共接口 ───────────────────────────────────────
 
@@ -71,9 +72,10 @@ function chunkBySemanticBoundaries(
     // 按标题边界切分
     for (let i = 0; i < headingMatches.length; i++) {
       const start = headingMatches[i].index;
-      const end = i + 1 < headingMatches.length
-        ? headingMatches[i + 1].index
-        : content.length;
+      const end =
+        i + 1 < headingMatches.length
+          ? headingMatches[i + 1].index
+          : content.length;
       const section = content.slice(start, end).trim();
       if (section.length > 0) {
         // 如果段落太长，进一步切分
@@ -95,25 +97,35 @@ function chunkBySemanticBoundaries(
 /**
  * 按段落（连续两个换行）切分，单个段落超过 chunkSize 则硬切。
  */
-function chunkByParagraphs(text: string, chunkSize: number, overlap: number): string[] {
-  const paragraphs = text.split(/\n\n+/).map(p => p.trim()).filter(p => p.length > 0);
+function chunkByParagraphs(
+  text: string,
+  chunkSize: number,
+  overlap: number,
+): string[] {
+  const paragraphs = text
+    .split(/\n\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
   const chunks: string[] = [];
-  let current = '';
+  let current = "";
 
   for (const para of paragraphs) {
     if (para.length > chunkSize) {
       // 单个段落太长，按句子或硬切
-      if (current) { chunks.push(current); current = ''; }
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
       // 将长段落按 chunkSize 切分
-      for (let i = 0; i < para.length; i += (chunkSize - overlap)) {
+      for (let i = 0; i < para.length; i += chunkSize - overlap) {
         const chunk = para.slice(i, i + chunkSize).trim();
         if (chunk.length > 0) chunks.push(chunk);
       }
-    } else if ((current + '\n\n' + para).length > chunkSize) {
+    } else if ((current + "\n\n" + para).length > chunkSize) {
       chunks.push(current);
       current = para;
     } else {
-      current = current ? current + '\n\n' + para : para;
+      current = current ? current + "\n\n" + para : para;
     }
   }
 
@@ -137,37 +149,36 @@ export async function importDocument(
   input: ImportDocumentInput,
   pool: Pool,
 ): Promise<ImportDocumentResult> {
-  const {
-    source,
-    content,
-    overlap = 100,
-    chunk_size = 1500,
-  } = input;
+  const { source, content, overlap = 100, chunk_size = 1500 } = input;
 
   if (!source || source.trim().length === 0) {
-    throw new Error('source is required');
+    throw new Error("source is required");
   }
   if (!content || content.trim().length === 0) {
-    throw new Error('content is required');
+    throw new Error("content is required");
   }
 
   // 获取 embedding 服务
   const embedder = getEmbeddingService();
   if (!embedder) {
-    throw new Error('Embedding service is not available. Check EMBEDDING_PROVIDER and API keys.');
+    throw new Error(
+      "Embedding service is not available. Check EMBEDDING_PROVIDER and API keys.",
+    );
   }
-  const embeddingDim = parseInt(process.env.EMBEDDING_DIMENSIONS || '1024', 10);
+  const embeddingDim = getConfig().embeddingDimensions;
 
   // 分块
   const chunks = chunkBySemanticBoundaries(content, chunk_size, overlap);
-  logger.info(`Document split into ${chunks.length} chunks for source: ${source}`);
+  logger.info(
+    `Document split into ${chunks.length} chunks for source: ${source}`,
+  );
 
   // 获取默认 session
   let targetSessionId: string | undefined;
   if (input.session_id) {
     const sessionResult = await pool.query(
-      'SELECT id FROM session_map WHERE opencode_session_id = $1',
-      [input.session_id]
+      "SELECT id FROM session_map WHERE opencode_session_id = $1",
+      [input.session_id],
     );
     if (sessionResult.rows.length > 0) {
       targetSessionId = sessionResult.rows[0].id;
@@ -176,7 +187,7 @@ export async function importDocument(
   if (!targetSessionId) {
     // 使用第一个可用 session
     const firstSession = await pool.query(
-      'SELECT id FROM session_map ORDER BY created_at ASC LIMIT 1'
+      "SELECT id FROM session_map ORDER BY created_at ASC LIMIT 1",
     );
     if (firstSession.rows.length > 0) {
       targetSessionId = firstSession.rows[0].id;
@@ -185,12 +196,12 @@ export async function importDocument(
 
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     // 1. 删除旧数据
     const deleteResult = await client.query(
-      'DELETE FROM observations WHERE source = $1',
-      [source]
+      "DELETE FROM observations WHERE source = $1",
+      [source],
     );
     const deletedCount = deleteResult.rowCount ?? 0;
     logger.info(`Deleted ${deletedCount} old chunks for source: ${source}`);
@@ -198,63 +209,79 @@ export async function importDocument(
     // 2. 逐块插入
     let importedCount = 0;
     for (const chunk of chunks) {
-      const sourceHash = createHash('sha256')
+      const sourceHash = createHash("sha256")
         .update(chunk + source)
-        .digest('hex');
+        .digest("hex");
 
       // 生成 embedding（异步但在此同步等待）
       let embedding: number[] | null = null;
       try {
         const rawEmbedding = await embedder.generateEmbedding(chunk);
         // 确保 embedding 维度匹配
-        embedding = Array.isArray(rawEmbedding) ? rawEmbedding.slice(0, embeddingDim) : null;
+        embedding = Array.isArray(rawEmbedding)
+          ? rawEmbedding.slice(0, embeddingDim)
+          : null;
       } catch (embedErr) {
-        logger.warn(`Embedding failed for chunk, inserting without embedding: ${embedErr}`);
+        logger.warn(
+          `Embedding failed for chunk, inserting without embedding: ${embedErr}`,
+        );
       }
 
       if (embedding) {
-        await client.query(`
+        await client.query(
+          `
           INSERT INTO observations (
             session_map_id, tool_name, tool_input_summary, embedding,
             importance, source, source_hash, metadata
           ) VALUES ($1, 'import_document', $2, $3::vector, 4, $4, $5, $6)
-        `, [
-          targetSessionId || null,
-          chunk,
-          embedding,
-          source,
-          sourceHash,
-          JSON.stringify({ imported_at: new Date().toISOString() })
-        ]);
+        `,
+          [
+            targetSessionId || null,
+            chunk,
+            embedding,
+            source,
+            sourceHash,
+            JSON.stringify({ imported_at: new Date().toISOString() }),
+          ],
+        );
       } else {
         // 无 embedding 时插入空向量或跳过
-        await client.query(`
+        await client.query(
+          `
           INSERT INTO observations (
             session_map_id, tool_name, tool_input_summary,
             importance, source, source_hash, metadata
           ) VALUES ($1, 'import_document', $2, 4, $3, $4, $5)
-        `, [
-          targetSessionId || null,
-          chunk,
-          source,
-          sourceHash,
-          JSON.stringify({ imported_at: new Date().toISOString() })
-        ]);
+        `,
+          [
+            targetSessionId || null,
+            chunk,
+            source,
+            sourceHash,
+            JSON.stringify({ imported_at: new Date().toISOString() }),
+          ],
+        );
       }
 
       importedCount++;
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     // 3. 事务外异步 REINDEX（避免事务内阻塞）
-    pool.query(`
+    pool
+      .query(
+        `
       REINDEX INDEX CONCURRENTLY idx_observations_embedding
-    `).catch((err) => {
-      logger.warn(`REINDEX failed (non-fatal): ${err}`);
-    });
+    `,
+      )
+      .catch((err) => {
+        logger.warn(`REINDEX failed (non-fatal): ${err}`);
+      });
 
-    logger.info(`Import complete: ${importedCount} chunks for source: ${source}`);
+    logger.info(
+      `Import complete: ${importedCount} chunks for source: ${source}`,
+    );
     return {
       success: true,
       chunks_imported: importedCount,
@@ -262,7 +289,7 @@ export async function importDocument(
       source,
     };
   } catch (error) {
-    await client.query('ROLLBACK');
+    await client.query("ROLLBACK");
     logger.error(`Import failed for source ${source}:`, error);
     throw error;
   } finally {

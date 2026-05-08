@@ -1,126 +1,106 @@
 /**
- * Centralized configuration for pg-memory plugin.
+ * config.ts — 统一配置入口（薄封装层）
  *
- * Priority: env vars > ~/.config/opencode/pg-memory.jsonc > defaults
- * Uses Zod for runtime validation + type inference (no manual `as` casts).
+ * 底层实现迁移至 src/shared/：
+ *   - settings-defaults.ts: 4 层配置合并 + Zod 校验
+ *   - env-manager.ts: .env 文件 + BLOCKED_ENV_VARS + 隔离环境
+ *   - paths.ts: 数据目录 + 文件路径
+ *
+ * 保持此文件的导出签名不变，确保现有 import 不中断。
+ *
+ * 配置优先级（由高到低）:
+ *   1. process.env (运行时注入)
+ *   2. ~/.opencode-pg-memory/settings.json (数据目录)
+ *   3. ~/.config/opencode/pg-memory.json[c] (OpenCode 配置目录)
+ *   4. 硬编码默认值
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { z } from "zod";
 
-const CONFIG_DIR = join(homedir(), ".config", "opencode");
-const CONFIG_FILES = [
-  join(CONFIG_DIR, "pg-memory.jsonc"),
-  join(CONFIG_DIR, "pg-memory.json"),
-];
+import {
+  getSettings,
+  SettingsSchema,
+  type Settings,
+} from "./shared/settings-defaults";
+import {
+  loadDotEnv,
+  saveDotEnv,
+  resolveConfig,
+  resolveEmbeddingApiKey,
+  buildIsolatedEnv,
+  BLOCKED_ENV_VARS,
+  type PgMemoryEnv,
+} from "./shared/env-manager";
+import { clearSettingsCache } from "./shared/settings-defaults";
+import {
+  DATA_DIR,
+  ENV_FILE_PATH,
+  SETTINGS_FILE_PATH,
+  LOCAL_DB_PATH,
+  LOGS_DIR,
+  ensureAllDirs,
+} from "./shared/paths";
 
-// ── Zod Schema ────────────────────────────────────────
-// 单一来源：类型由 schema 自动推导，消除 interface + as 双重维护
+// ── Re-export for backward compatibility ──
 
-const SyncModeSchema = z.enum(["hybrid", "polling", "event"]);
+export { SettingsSchema as ConfigSchema, type Settings as PgMemoryConfig };
 
-export const ConfigSchema = z.object({
-  pgHost: z.string().default("localhost"),
-  pgPort: z.coerce.number().int().min(1).max(65535).default(5432),
-  pgDatabase: z.string().default("PGOMO"),
-  pgUser: z.string().default("opencode"),
-  pgPassword: z.string().default(""),
+export type { PgMemoryEnv };
 
-  embeddingProvider: z.enum(["ollama", "deepseek", "openai"]).default("ollama"),
-  embeddingModel: z.string().default("qwen3-embedding:0.6b"),
-  embeddingDimensions: z.coerce.number().int().positive().default(1024),
-  embeddingBatchSize: z.coerce.number().int().positive().default(10),
+export {
+  loadDotEnv,
+  saveDotEnv,
+  resolveConfig,
+  resolveEmbeddingApiKey,
+  buildIsolatedEnv,
+  BLOCKED_ENV_VARS,
+  DATA_DIR,
+  ENV_FILE_PATH,
+  SETTINGS_FILE_PATH,
+  LOCAL_DB_PATH,
+  LOGS_DIR,
+  ensureAllDirs,
+};
 
-  similarityThreshold: z.coerce.number().min(0).max(1).default(0.6),
-  maxMemories: z.coerce.number().int().positive().default(10),
-  logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
-  compactionThreshold: z.coerce.number().min(0).max(1).default(0.8),
-  syncMode: SyncModeSchema.default("hybrid"),
-  pollingIntervalMs: z.coerce.number().int().positive().default(5000),
-});
+// ── Singleton config accessors ──
 
-export type PgMemoryConfig = z.infer<typeof ConfigSchema>;
-
-// ── Merged Config ─────────────────────────────────────
-
-function stripJsoncComments(content: string): string {
-  return content.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-}
-
-function loadRawFileConfig(): Record<string, unknown> {
-  for (const path of CONFIG_FILES) {
-    if (existsSync(path)) {
-      try {
-        const content = readFileSync(path, "utf-8");
-        return JSON.parse(stripJsoncComments(content));
-      } catch {
-        // invalid config, fall through
-      }
-    }
-  }
-  return {};
-}
+let _config: Settings | null = null;
 
 /**
- * 构建运行时配置。
- * 优先级：env var > file config > schema default
- * 所有值在返回前经过 Zod 解析校验，类型安全。
+ * 获取缓存的配置。首次调用后缓存，后续返回单例。
  */
-export function buildConfig(): PgMemoryConfig {
-  const fileConfig = loadRawFileConfig();
-
-  // 从 process.env 读取所有 PG/EMBEDDING 前缀的环境变量
-  const envRaw: Record<string, string> = {};
-  for (const [key, val] of Object.entries(process.env)) {
-    if (
-      val &&
-      (key.startsWith("PG_") ||
-        key.startsWith("EMBEDDING_") ||
-        key.startsWith("PG_MEMORY_"))
-    ) {
-      // 转小写下划线 → camelCase
-      const parts = key.replace("PG_MEMORY_", "").toLowerCase().split("_");
-      const camel =
-        parts[0] +
-        parts
-          .slice(1)
-          .map((s) => s[0].toUpperCase() + s.slice(1))
-          .join("");
-      envRaw[camel] = val;
-    }
+export function getConfig(): Settings {
+  if (!_config) {
+    _config = getSettings();
+    ensureAllDirs();
   }
-
-  // env → file → defaults 三层合并后交由 Zod 解析
-  // Zod schema 已定义每个字段的 default 值
-  const defaults = ConfigSchema.parse({});
-  const merged = { ...defaults, ...fileConfig, ...envRaw };
-  const result = ConfigSchema.safeParse(merged);
-
-  if (!result.success) {
-    console.error("[pg-memory] Config validation errors:");
-    for (const issue of result.error.issues) {
-      console.error(`  ${issue.path.join(".")}: ${issue.message}`);
-    }
-    // 用 Zod 兜底（所有字段都有 default）
-    return ConfigSchema.parse({});
-  }
-
-  return result.data;
-}
-
-// 模块级单例
-let _config: PgMemoryConfig | null = null;
-
-export function getConfig(): PgMemoryConfig {
-  if (!_config) _config = buildConfig();
   return _config;
 }
 
-export function isConfigured(): boolean {
-  return !!getConfig().pgPassword;
+/**
+ * 构建运行时配置（等价于 getConfig，向后兼容）
+ */
+export function buildConfig(): Settings {
+  return getConfig();
 }
 
+/**
+ * 清除配置缓存，下次 getConfig/buildConfig 会重新加载。
+ */
+export function reloadConfig(): void {
+  // Clear BOTH caches. Next getConfig() call re-reads everything fresh.
+  _config = null;
+  clearSettingsCache();
+}
+
+/**
+ * 检查数据库是否已配置（有密码或 .env 文件存在）
+ */
+export function isConfigured(): boolean {
+  return !!(getConfig().pgPassword || loadDotEnv().PG_PASSWORD);
+}
+
+/**
+ * 构建数据库配置对象（用于 Pool 初始化）
+ */
 export function getDatabaseConfig() {
   const cfg = getConfig();
   return {
@@ -128,6 +108,21 @@ export function getDatabaseConfig() {
     port: cfg.pgPort,
     database: cfg.pgDatabase,
     user: cfg.pgUser,
-    password: cfg.pgPassword,
+    password: cfg.pgPassword || loadDotEnv().PG_PASSWORD || "",
+  };
+}
+
+/**
+ * 获取嵌入配置
+ */
+export function getEmbeddingConfig() {
+  const cfg = getConfig();
+  return {
+    provider: cfg.embeddingProvider,
+    model: cfg.embeddingModel,
+    dimensions: cfg.embeddingDimensions,
+    batchSize: cfg.embeddingBatchSize,
+    apiKey: resolveEmbeddingApiKey(cfg.embeddingProvider),
+    baseURL: resolveConfig("DEEPSEEK_BASE_URL"),
   };
 }

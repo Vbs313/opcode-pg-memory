@@ -1,0 +1,533 @@
+/**
+ * system-transform-injector.ts
+ *
+ * 两路召回 + 混合排序的 memory injection 引擎。
+ * 专用于 experimental.chat.system.transform 钩子。
+ *
+ * 设计参考：
+ * - claude-mem 的 context-generator（SQLite → 注入 system prompt）
+ * - OpenCode 官方文档：合并到 output.system[0]，禁止 push 新条目
+ * - 混合策略：关键词召回（project 过滤） + 语义召回（pgvector ANN）
+ *
+ * 评分公式：
+ *   score = vector_similarity × 0.5 + importance × 0.3 + recency_boost × 0.2
+ */
+
+import { Pool } from "pg";
+import { createLogger } from "../services/logger";
+
+const logger = createLogger("system-transform-injector");
+
+// ============================================================
+// Types
+// ============================================================
+
+export interface InjectionInput {
+  /** The system prompt content being built (pre-transform) */
+  systemPrompt: string;
+  /** OpenCode session ID */
+  sessionId?: string;
+  /** Model context limit */
+  contextLimit: number;
+  /** Current project name (if available) */
+  project?: string;
+  /** Platform source (opencode, claude-code, cursor, etc.) */
+  platformSource?: string;
+}
+
+export interface MemoryResult {
+  id: string;
+  type: "observation" | "reflection" | "entity";
+  content: string;
+  score: number;
+  importance: number;
+  project: string | null;
+  createdAt: Date;
+}
+
+export interface InjectionConfig {
+  /** Max tokens for injection block. Default: 2000 */
+  maxTokens: number;
+  /** Min score threshold. Default: 0.3 */
+  minScore: number;
+  /** Path A — keyword recall limit. Default: 20 */
+  keywordLimit: number;
+  /** Path B — semantic recall limit. Default: 20 */
+  semanticLimit: number;
+  /** Dedup window (chars). Default: 100 — observations with same prefix hash are deduped */
+  dedupPrefixLength: number;
+  /** Hybrid scoring weights: [semantic, importance, recency] */
+  weights: [number, number, number];
+  /** Recency half-life in days. Default: 2 (48h) */
+  recencyHalfLifeDays: number;
+}
+
+const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
+  maxTokens: 2000,
+  minScore: 0.3,
+  keywordLimit: 20,
+  semanticLimit: 20,
+  dedupPrefixLength: 100,
+  weights: [0.5, 0.3, 0.2],
+  recencyHalfLifeDays: 2,
+};
+
+// ============================================================
+// Scoring helpers
+// ============================================================
+
+export function computeRecencyBoost(
+  createdAt: Date,
+  halfLifeDays: number,
+): number {
+  const ageMs = Date.now() - new Date(createdAt).getTime();
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  // Exponential decay: boost = 2^(-age / halfLife)
+  return Math.pow(2, -ageDays / halfLifeDays);
+}
+
+export function hybridScore(
+  vectorSimilarity: number | null,
+  importance: number,
+  recencyBoost: number,
+  weights: [number, number, number],
+): number {
+  const [wSem, wImp, wRec] = weights;
+  const sem = (vectorSimilarity ?? 0.5) * wSem;
+  const imp = (importance / 5) * wImp; // normalize importance 1-5 → 0.2-1.0
+  const rec = recencyBoost * wRec;
+  return sem + imp + rec;
+}
+
+// ============================================================
+// Content dedup helpers
+// ============================================================
+
+export function dedupKey(content: string, prefixLen: number): string {
+  // Normalize whitespace first, then take prefix
+  return content
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .substring(0, prefixLen);
+}
+
+export function dedup(
+  results: MemoryResult[],
+  prefixLen: number,
+): MemoryResult[] {
+  const seen = new Set<string>();
+  const deduped: MemoryResult[] = [];
+  for (const r of results) {
+    const key = dedupKey(r.content, prefixLen);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(r);
+  }
+  return deduped;
+}
+
+// ============================================================
+// Token estimation
+// ============================================================
+
+export function estimateTokens(text: string): number {
+  if (!text) return 0;
+  const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
+  const totalChars = text.length;
+  const chineseRatio = chineseChars / totalChars;
+  if (chineseRatio > 0.5) {
+    return Math.ceil(totalChars * 0.8);
+  }
+  return Math.ceil(totalChars / 4);
+}
+
+export function trimToTokenBudget(
+  results: MemoryResult[],
+  maxTokens: number,
+): MemoryResult[] {
+  let used = 0;
+  const trimmed: MemoryResult[] = [];
+  for (const r of results) {
+    const tokens = estimateTokens(r.content);
+    if (used + tokens > maxTokens) break;
+    used += tokens;
+    trimmed.push(r);
+  }
+  return trimmed;
+}
+
+// ============================================================
+// Formatter
+// ============================================================
+
+export function formatInjectionBlock(
+  memories: MemoryResult[],
+  sessionSummary: string | null,
+  project: string | null,
+): string {
+  // Always render if we have project context, summary, or memories
+  if (!project && memories.length === 0 && !sessionSummary) return "";
+
+  const lines: string[] = [];
+  lines.push("<pg_memory>");
+
+  if (project) {
+    lines.push(`project: ${project}`);
+  }
+
+  if (sessionSummary) {
+    lines.push("");
+    lines.push("<session_context>");
+    lines.push(sessionSummary);
+    lines.push("</session_context>");
+  }
+
+  if (memories.length > 0) {
+    lines.push("");
+    lines.push("<relevant_memories>");
+    for (const m of memories) {
+      const label =
+        m.type === "reflection"
+          ? "REFLECTION"
+          : m.type === "entity"
+            ? "ENTITY"
+            : "OBSERVATION";
+      const pct = (m.score * 100).toFixed(0);
+      lines.push(`- [${label}] (${pct}%) ${m.content.substring(0, 300)}`);
+    }
+    lines.push("</relevant_memories>");
+  }
+
+  lines.push("</pg_memory>");
+  return lines.join("\n");
+}
+
+// ============================================================
+// Path A: Keyword recall (project-scoped, importance-sorted)
+// ============================================================
+
+async function keywordRecall(
+  pool: Pool,
+  project: string | undefined,
+  limit: number,
+): Promise<MemoryResult[]> {
+  if (project) {
+    // Project-scoped: top observations by importance + recency
+    const { rows } = await pool.query(
+      `
+      SELECT o.id, o.tool_name, o.tool_input_summary, o.tool_output_summary,
+             o.importance, o.created_at, o.source,
+             sm.project_id
+      FROM observations o
+      LEFT JOIN session_map sm ON o.session_map_id = sm.id
+      WHERE sm.project_id = $1
+        AND o.importance >= 2
+      ORDER BY o.importance DESC, o.created_at DESC
+      LIMIT $2
+      `,
+      [project, limit],
+    );
+    return rows.map((row: any) => {
+      const content = buildObservationContent(row);
+      return {
+        id: row.id,
+        type: "observation" as const,
+        content,
+        score: row.importance / 5,
+        importance: row.importance,
+        project: row.project_id,
+        createdAt: row.created_at,
+      };
+    });
+  }
+
+  // No project: global top observations
+  const { rows } = await pool.query(
+    `
+    SELECT o.id, o.tool_name, o.tool_input_summary, o.tool_output_summary,
+           o.importance, o.created_at, o.source,
+           sm.project_id
+    FROM observations o
+    LEFT JOIN session_map sm ON o.session_map_id = sm.id
+    WHERE o.importance >= 3
+    ORDER BY o.importance DESC, o.created_at DESC
+    LIMIT $1
+    `,
+    [limit],
+  );
+  return rows.map((row: any) => ({
+    id: row.id,
+    type: "observation" as const,
+    content: buildObservationContent(row),
+    score: row.importance / 5,
+    importance: row.importance,
+    project: row.project_id,
+    createdAt: row.created_at,
+  }));
+}
+
+function buildObservationContent(row: any): string {
+  const parts: string[] = [];
+  if (row.tool_name) parts.push(`[${row.tool_name}]`);
+  if (row.tool_input_summary)
+    parts.push(`input: ${row.tool_input_summary.substring(0, 100)}`);
+  if (row.tool_output_summary)
+    parts.push(`output: ${row.tool_output_summary.substring(0, 100)}`);
+  if (row.source) parts.push(`(source: ${row.source})`);
+  return parts.join(" ") || `observation ${row.id}`;
+}
+
+// ============================================================
+// Path B: Semantic recall (pgvector ANN)
+// ============================================================
+
+async function semanticRecall(
+  pool: Pool,
+  embedding: number[],
+  project: string | undefined,
+  limit: number,
+): Promise<MemoryResult[]> {
+  if (!embedding || embedding.length === 0) return [];
+
+  const vectorLit = `[${embedding.join(",")}]`;
+  let query: string;
+  let params: any[];
+
+  if (project) {
+    query = `
+      SELECT o.id, o.tool_name, o.tool_input_summary, o.tool_output_summary,
+             o.importance, o.created_at, o.source,
+             sm.project_id,
+             1 - (o.embedding <=> $1::vector) AS similarity
+      FROM observations o
+      LEFT JOIN session_map sm ON o.session_map_id = sm.id
+      WHERE o.embedding IS NOT NULL
+        AND sm.project_id = $2
+      ORDER BY o.embedding <=> $1::vector
+      LIMIT $3
+    `;
+    params = [vectorLit, project, limit];
+  } else {
+    query = `
+      SELECT o.id, o.tool_name, o.tool_input_summary, o.tool_output_summary,
+             o.importance, o.created_at, o.source,
+             sm.project_id,
+             1 - (o.embedding <=> $1::vector) AS similarity
+      FROM observations o
+      LEFT JOIN session_map sm ON o.session_map_id = sm.id
+      WHERE o.embedding IS NOT NULL
+      ORDER BY o.embedding <=> $1::vector
+      LIMIT $2
+    `;
+    params = [vectorLit, limit];
+  }
+
+  const { rows } = await pool.query(query, params);
+  return rows.map((row: any) => {
+    const content = buildObservationContent(row);
+    return {
+      id: row.id,
+      type: "observation" as const,
+      content,
+      score: Number(row.similarity) || 0,
+      importance: row.importance,
+      project: row.project_id,
+      createdAt: row.created_at,
+    };
+  });
+}
+
+// ============================================================
+// Session summary retrieval
+// ============================================================
+
+async function retrieveSessionSummary(
+  pool: Pool,
+  opencodeSessionId?: string,
+): Promise<string | null> {
+  if (!opencodeSessionId) return null;
+
+  try {
+    // First check session_summaries table
+    const { rows } = await pool.query(
+      `SELECT learned, completed, next_steps, request
+       FROM session_summaries
+       WHERE opencode_session_id = $1
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [opencodeSessionId],
+    );
+    if (rows.length > 0) {
+      const r = rows[0];
+      const parts: string[] = [];
+      if (r.request) parts.push(`request: ${r.request.substring(0, 200)}`);
+      if (r.learned) parts.push(`learned: ${r.learned.substring(0, 300)}`);
+      if (r.completed)
+        parts.push(`completed: ${r.completed.substring(0, 200)}`);
+      if (r.next_steps) parts.push(`next: ${r.next_steps.substring(0, 200)}`);
+      return parts.length > 0 ? parts.join("\n") : null;
+    }
+
+    // Fallback: check reflections table (existing data)
+    const { rows: refRows } = await pool.query(
+      `SELECT summary FROM reflections
+       WHERE session_map_id = (
+         SELECT id FROM session_map WHERE opencode_session_id = $1 LIMIT 1
+       )
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [opencodeSessionId],
+    );
+    if (refRows.length > 0) {
+      return `reflection: ${refRows[0].summary.substring(0, 500)}`;
+    }
+
+    return null;
+  } catch (err) {
+    logger.warn("Failed to retrieve session summary", err);
+    return null;
+  }
+}
+
+// ============================================================
+// Embedding generation for the system prompt content
+// ============================================================
+
+async function generateQueryEmbedding(text: string): Promise<number[] | null> {
+  if (!text || text.trim().length < 10) return null;
+
+  try {
+    // API keys resolved from config: process.env → .env file → fallback
+    const { getConfig, resolveEmbeddingApiKey, resolveConfig } =
+      await import("../config");
+    const cfg = getConfig();
+    const provider = cfg.embeddingProvider;
+    const model = cfg.embeddingModel;
+    const apiKey = resolveEmbeddingApiKey(provider);
+    const baseURL =
+      provider === "deepseek"
+        ? resolveConfig("DEEPSEEK_BASE_URL") || "https://api.deepseek.com"
+        : undefined;
+
+    if (!apiKey) {
+      logger.warn("No API key for embedding — semantic recall disabled");
+      return null;
+    }
+
+    const { OpenAI } = await import("openai");
+    const client = new OpenAI({ apiKey, baseURL });
+
+    const response = await client.embeddings.create({
+      model,
+      input: text.substring(0, 8000), // truncate to avoid token limits
+    });
+
+    return response.data[0].embedding;
+  } catch (err) {
+    logger.warn(
+      "Embedding generation failed — falling back to keyword-only recall",
+      err,
+    );
+    return null;
+  }
+}
+
+// ============================================================
+// Main entry: mixed two-path retrieval + hybrid scoring
+// ============================================================
+
+export async function retrieveMemoriesForInjection(
+  input: InjectionInput,
+  pool: Pool,
+  config?: Partial<InjectionConfig>,
+): Promise<{
+  memories: MemoryResult[];
+  summary: string | null;
+}> {
+  const cfg: InjectionConfig = { ...DEFAULT_INJECTION_CONFIG, ...config };
+
+  // ── Path A: Keyword recall (always) ──
+  const pathAResults = await keywordRecall(
+    pool,
+    input.project,
+    cfg.keywordLimit,
+  );
+
+  // ── Path B: Semantic recall (if embedding available) ──
+  let pathBResults: MemoryResult[] = [];
+  const embedding = await generateQueryEmbedding(input.systemPrompt);
+  if (embedding) {
+    pathBResults = await semanticRecall(
+      pool,
+      embedding,
+      input.project,
+      cfg.semanticLimit,
+    );
+  }
+
+  // ── Merge & hybrid score ──
+  const merged = new Map<string, MemoryResult>();
+
+  for (const r of pathAResults) {
+    const key = dedupKey(r.content, cfg.dedupPrefixLength);
+    const recencyBoost = computeRecencyBoost(
+      r.createdAt,
+      cfg.recencyHalfLifeDays,
+    );
+    const score = hybridScore(null, r.importance, recencyBoost, cfg.weights);
+    merged.set(key, { ...r, score });
+  }
+
+  for (const r of pathBResults) {
+    const key = dedupKey(r.content, cfg.dedupPrefixLength);
+    const existing = merged.get(key);
+    const recencyBoost = computeRecencyBoost(
+      r.createdAt,
+      cfg.recencyHalfLifeDays,
+    );
+    const score = hybridScore(r.score, r.importance, recencyBoost, cfg.weights);
+    if (existing) {
+      // Use max score from both paths
+      merged.set(key, { ...existing, score: Math.max(existing.score, score) });
+    } else {
+      merged.set(key, { ...r, score });
+    }
+  }
+
+  // ── Sort by score DESC ──
+  let sorted = Array.from(merged.values())
+    .filter((r) => r.score >= cfg.minScore)
+    .sort((a, b) => b.score - a.score);
+
+  // ── Dedup by content prefix ──
+  sorted = dedup(sorted, cfg.dedupPrefixLength);
+
+  // ── Trim to token budget ──
+  sorted = trimToTokenBudget(sorted, cfg.maxTokens);
+
+  // ── Retrieve session summary ──
+  const summary = await retrieveSessionSummary(pool, input.sessionId);
+
+  logger.info(
+    `Injection: ${sorted.length} memories + ${summary ? "summary" : "no summary"}`,
+  );
+
+  return { memories: sorted, summary };
+}
+
+/**
+ * Build the injection block string for system prompt merging.
+ */
+export async function buildInjectionBlock(
+  input: InjectionInput,
+  pool: Pool,
+  config?: Partial<InjectionConfig>,
+): Promise<string> {
+  const { memories, summary } = await retrieveMemoriesForInjection(
+    input,
+    pool,
+    config,
+  );
+  return formatInjectionBlock(memories, summary, input.project ?? null);
+}

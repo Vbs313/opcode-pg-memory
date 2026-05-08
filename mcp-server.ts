@@ -3,18 +3,25 @@
 /**
  * MCP Server for OpenCode PG Memory Plugin
  *
- * 提供 recall_memory 和 hindsight_reflect 两个 MCP 工具
+ * Supports two transport modes:
+ *   1. stdio (default) — used by OpenCode, Cursor, Windsurf MCP configs
+ *   2. sse (standalone) — `opcode-pg-memory mcp start --port 37777`
+ *      for background daemon mode
+ *
+ * Tools: recall_memory, hindsight_reflect, import_document, sync_health, backfill_embeddings
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import http from "http";
 import { Pool } from "pg";
-import { initializeDatabase, DatabaseConfig } from "./src/db/init-db";
+import { initializeDatabase } from "./src/db/init-db";
 import { recallMemory, RecallMemoryInput } from "./src/mcp/recall-memory";
 import {
   hindsightReflect,
@@ -23,18 +30,12 @@ import {
 import { importDocument, ImportDocumentInput } from "./src/mcp/import-document";
 import { createLogger } from "./src/services/logger";
 import { classifyError } from "./src/utils/error-classifier";
+import { getDatabaseConfig } from "./src/config";
 
 const logger = createLogger("mcp-server");
 
-// 配置加载：环境变量（由 OpenCode MCP config 的 environment 字段注入，或 .env 文件）
-const dbConfig: DatabaseConfig = {
-  host: process.env.PG_HOST || "localhost",
-  port: parseInt(process.env.PG_PORT || "5432", 10),
-  database: process.env.PG_DATABASE || "opencode_memory",
-  user: process.env.PG_USER || "opencode",
-  password: process.env.PG_PASSWORD || "",
-  ssl: process.env.PG_SSL === "true",
-};
+// 配置加载：通过 config 模块（4 层合并：env → settings.json → file → 默认值）
+const dbConfig = getDatabaseConfig();
 
 // 工具定义
 const TOOLS: Tool[] = [
@@ -267,8 +268,83 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   },
 };
 
+// ── SSE Transport Helpers ──────────────────────────────────
+// Session ID → SSEServerTransport mapping for routing POST requests
+
+const sseTransports = new Map<string, SSEServerTransport>();
+
+/**
+ * Create and start an HTTP server with SSE transport.
+ * MCP clients connect via GET /sse, then POST /sse/{sessionId} for messages.
+ */
+async function startSSEServer(
+  server: Server,
+  port: number,
+): Promise<http.Server> {
+  const httpServer = http.createServer(async (req, res) => {
+    const url = new URL(req.url || "/", `http://${req.headers.host}`);
+    const pathname = url.pathname;
+
+    try {
+      if (req.method === "GET" && pathname === "/sse") {
+        // SSE connection: client opens stream here
+        const transport = new SSEServerTransport("/sse/message", res);
+        sseTransports.set(transport.sessionId, transport);
+        res.on("close", () => {
+          sseTransports.delete(transport.sessionId);
+        });
+        await server.connect(transport);
+      } else if (
+        req.method === "POST" &&
+        pathname.startsWith("/sse/message/")
+      ) {
+        // Client POSTs JSON-RPC messages here
+        const sessionId = pathname.split("/").pop() || "";
+        const transport = sseTransports.get(sessionId);
+        if (!transport) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "Session not found" }));
+          return;
+        }
+        await transport.handlePostMessage(req, res);
+      } else {
+        res.writeHead(404);
+        res.end("Not found");
+      }
+    } catch (error) {
+      logger.error("SSE server error", error);
+      if (!res.headersSent) {
+        res.writeHead(500);
+        res.end("Internal server error");
+      }
+    }
+  });
+
+  return new Promise<http.Server>((resolve) => {
+    httpServer.listen(port, "127.0.0.1", () => {
+      logger.info(`SSE server listening on http://127.0.0.1:${port}/sse`);
+      resolve(httpServer);
+    });
+  });
+}
+
 async function main() {
-  logger.info("Starting server...");
+  // Parse CLI flags: --transport sse|stdio (default: stdio), --port N (default: 37777)
+  const transportIdx = process.argv.indexOf("--transport");
+  const transportMode = (process.argv
+    .find((a) => a.startsWith("--transport="))
+    ?.split("=")[1] ||
+    (transportIdx !== -1 ? process.argv[transportIdx + 1] : undefined) ||
+    "stdio") as "stdio" | "sse";
+  const portIdx = process.argv.indexOf("--port");
+  const port = parseInt(
+    process.argv.find((a) => a.startsWith("--port="))?.split("=")[1] ||
+      (portIdx !== -1 ? process.argv[portIdx + 1] : undefined) ||
+      "37777",
+    10,
+  );
+
+  logger.info(`Starting MCP server (transport: ${transportMode})...`);
 
   // 初始化数据库
   let pool: Pool;
@@ -302,7 +378,6 @@ async function main() {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
-    // 验证参数存在
     if (!args) {
       return {
         content: [
@@ -320,9 +395,7 @@ async function main() {
 
     try {
       const handler = TOOL_HANDLERS[name];
-      if (!handler) {
-        throw new Error(`Unknown tool: ${name}`);
-      }
+      if (!handler) throw new Error(`Unknown tool: ${name}`);
       return await handler(args as Record<string, unknown>, pool);
     } catch (error) {
       const classified = classifyError(error);
@@ -330,7 +403,6 @@ async function main() {
         `${classified.severity.toUpperCase()} [${classified.category}] ${classified.message}`,
       );
       if (classified.suggestion) logger.info(`→ ${classified.suggestion}`);
-
       return {
         content: [
           {
@@ -346,26 +418,23 @@ async function main() {
     }
   });
 
-  // 创建传输层
-  const transport = new StdioServerTransport();
+  // ── Connect transport ──
+  if (transportMode === "sse") {
+    await startSSEServer(server, port);
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    logger.info("Server running on stdio");
+  }
 
-  // 连接服务器
-  await server.connect(transport);
-
-  logger.info("Server running on stdio");
-
-  // 优雅关闭
-  process.on("SIGINT", async () => {
+  // ── Graceful shutdown ──
+  const shutdown = async () => {
     logger.info("Shutting down...");
-    await pool.end();
+    await pool.end().catch(() => {});
     process.exit(0);
-  });
-
-  process.on("SIGTERM", async () => {
-    logger.info("Shutting down...");
-    await pool.end();
-    process.exit(0);
-  });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 main().catch((error) => {

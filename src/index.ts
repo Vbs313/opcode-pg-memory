@@ -1,9 +1,5 @@
 import { Pool } from "pg";
-import {
-  initializeDatabase,
-  closeDatabase,
-  DatabaseConfig,
-} from "./db/init-db";
+import { initializeDatabase, closeDatabase } from "./db/init-db";
 import { handleSessionCreated } from "./hooks/session-created";
 import {
   handleToolExecuteBefore,
@@ -39,8 +35,10 @@ import {
   SyncMode,
 } from "./types";
 import type { PluginEvent, PluginEventType } from "./types";
-import { calculateTokenBudget } from "./utils/token-budget";
+import { calculateTokenBudget, estimateTokens } from "./utils/token-budget";
 import { detectMemoryKeyword, MEMORY_NUDGE_MESSAGE } from "./services/keyword";
+import { buildInjectionBlock } from "./injection/system-transform-injector";
+import { buildAndWriteSessionSummary } from "./injection/session-summary-writer";
 
 // ============================================================================
 // Plugin Type Definitions (matches official OpenCode Plugin API)
@@ -302,7 +300,6 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
 
   // Track sessions that have received memory injection
   const injectedSessions = new Set<string>();
-  const injectedSystemPrompt = new Set<string>();
 
   // ==========================================================================
   // Return hooks object
@@ -329,6 +326,16 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
           source: "hook",
           data: properties,
         });
+
+        // Auto-write session summary when session is compacted
+        if (type === "session.compacted") {
+          buildAndWriteSessionSummary(
+            pool,
+            sid,
+            ctx.project?.name,
+            properties.info?.summary || properties.summary,
+          ).catch((err) => logger.warn("Failed to write session summary", err));
+        }
       } catch (error) {
         console.error(`[PG Memory] Error handling event '${type}':`, error);
       }
@@ -475,7 +482,10 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
     },
 
     // -----------------------------------------------------------------------
-    // experimental.chat.system.transform - inject MCP tool usage instructions
+    // experimental.chat.system.transform - inject memories into system prompt
+    //
+    // 两路召回 + 混合排序，合并到 output.system[0]（而非 push 新条目）。
+    // 参考：https://github.com/anomalyco/opencode/issues/23660
     // -----------------------------------------------------------------------
     "experimental.chat.system.transform": async (
       input: {
@@ -486,31 +496,49 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
     ) => {
       try {
         const sessionId = input.sessionID || "default";
-        if (injectedSystemPrompt.has(sessionId)) return;
-        injectedSystemPrompt.add(sessionId);
+        const systemContent = output.system?.[0] || "";
+        if (!systemContent) return;
 
-        output.system = output.system || [];
-        output.system.push(`## PG Memory Tools Available
+        // Read config for token budget
+        const contextLimit = input.model?.contextLimit || 128000;
+        const budgetMax = Math.min(
+          Math.max(Math.floor(contextLimit * 0.02), 500),
+          3000,
+        );
 
-You have access to long-term memory via the pg-memory plugin. These tools help you reuse knowledge across sessions:
+        // Build memory injection block (two-path recall + hybrid scoring)
+        const injectionBlock = await buildInjectionBlock(
+          {
+            systemPrompt: systemContent,
+            sessionId,
+            contextLimit,
+            project: ctx.project?.name,
+            platformSource: "opencode",
+          },
+          pool,
+          {
+            maxTokens: budgetMax,
+            minScore: 0.3,
+            keywordLimit: 20,
+            semanticLimit: 20,
+            dedupPrefixLength: 100,
+            weights: [0.5, 0.3, 0.2],
+            recencyHalfLifeDays: 2,
+          },
+        );
 
-### recall_memory — search historical memories
-Call this BEFORE starting any new task. It retrieves relevant entities, observations, and reflections from past sessions.
-- Example: recall_memory({ query: "database connection pool tuning" })
-- Best practice: always pass your current task goal as the query
-
-### hindsight_reflect — reflect on session
-Call this AFTER completing significant work to extract reusable patterns.
-- Example: hindsight_reflect({ trigger_type: "manual" })
-- Reflexions are automatically available in future sessions
-
-### When to use
-- Before diving into a new problem → recall_memory(query=<your goal>)
-- After completing a major task → hindsight_reflect()
-- When you need historical context about a specific topic → recall_memory(topic_segment_id=<id>)
-`);
+        if (injectionBlock) {
+          // Merge into the PRIMARY system block — NOT push a new entry.
+          // Single system message is required by vLLM/Qwen backends.
+          output.system[0] = systemContent + "\n\n" + injectionBlock;
+          logger.info(
+            `Injected ${estimateTokens(injectionBlock)} tokens of memory context`,
+            { sessionID: sessionId },
+          );
+        }
       } catch (error) {
-        logger.error("Error in system.transform:", error);
+        logger.error("Error in system.transform injection:", error);
+        // Non-blocking: never crash the LLM request
       }
     },
 

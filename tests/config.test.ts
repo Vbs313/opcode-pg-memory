@@ -4,7 +4,7 @@
  * 验证三层合并优先级、环境变量解析、校验失败降级。
  */
 
-import { ConfigSchema, buildConfig } from "../src/config";
+import { ConfigSchema, buildConfig, reloadConfig } from "../src/config";
 
 // 保存原始环境变量以便恢复
 const ORIGINAL_ENV = { ...process.env };
@@ -93,6 +93,10 @@ describe("ConfigSchema", () => {
 });
 
 describe("buildConfig", () => {
+  beforeEach(() => {
+    reloadConfig(); // clear cache so env vars are re-read
+  });
+
   test("reads PG_HOST from env", () => {
     process.env.PG_HOST = "10.0.0.1";
     const cfg = buildConfig();
