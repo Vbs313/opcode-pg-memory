@@ -89,16 +89,16 @@ export class DatabaseInitializer {
       // 4. 迁移旧列名（session_id → session_map_id）
       await this.migrateLegacyColumnNames(client);
 
-      // 5. 创建索引
-      await this.createIndexes(client);
-
-      // 6. 迁移旧 sessions 数据到 session_map
-      await this.migrateSessionsData(client);
-
-      // 6. 迁移 observations 表新增列（source, source_hash）
+      // 5. 迁移 observations 表新增列
       await this.migrateObservationsSource(client);
 
-      // 7. 初始化 OmO 适配 Schema（如果启用）
+      // 6. 创建索引（必须在列迁移之后）
+      await this.createIndexes(client);
+
+      // 7. 迁移旧 sessions 数据到 session_map
+      await this.migrateSessionsData(client);
+
+      // 8. 初始化 OmO 适配 Schema（如果启用）
       await this.initializeOmOSchema(client);
 
       await client.query("COMMIT");
@@ -251,10 +251,7 @@ export class DatabaseInitializer {
         agent_id VARCHAR(100)
       );
     `);
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_observations_platform_source
-        ON observations(platform_source);
-    `);
+    // platform_source 索引在 createIndexes 中创建（必须在列迁移之后）
 
     // ── reflections 表 ──
     await client.query(`
@@ -402,9 +399,12 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_observations_topic_segment ON observations(topic_segment_id);
     `);
 
-    // 查找索引 for observations.source
+    // 查找索引 for observations.source + platform_source
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_observations_source ON observations(source);
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_observations_platform_source ON observations(platform_source);
     `);
 
     // HNSW 索引 for observations

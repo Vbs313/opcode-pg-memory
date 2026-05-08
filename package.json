@@ -1,6 +1,6 @@
 {
   "name": "opcode-pg-memory",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -48,7 +48,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.5.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "better-sqlite3": "^12.9.0",
     "dotenv": "^16.3.1",
     "openai": "^4.20.0",
