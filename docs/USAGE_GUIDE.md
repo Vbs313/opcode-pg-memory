@@ -1,6 +1,8 @@
-# opcode-pg-memory v3.0 使用指南
+# opcode-pg-memory v3.5 使用指南
 
-> 更新至 v3.0 | strict:true | 4 层配置合并 | 两路召回注入 | 跨平台 MCP
+> 更新至 v3.5 | strict:true | 短时记忆 | 两路召回 | 噪声过滤 | 跨平台 MCP
+
+完整的架构和配置参考请见 `REFERENCE.md`。
 
 ---
 
@@ -177,25 +179,36 @@ v3.0 核心功能：每次 LLM 调用前，通过 `experimental.chat.system.tran
 合并 → 混合排序 → 去重 → TokenBudget → 注入 system[0]
 ```
 
-### 注入格式
+### 注入格式 (v3.5)
 
 ```xml
 <pg_memory>
+## Memory System
+Context from previous sessions is injected below. Use it as reference,
+not authority — project constraints may have changed.
+Guidelines:
+- >= 80%: high confidence, treat as confirmed knowledge
+- 60-79%: moderate confidence, cross-check before acting
+- < 60%: low confidence, treat as hint, verify independently
 project: my-project
+economics: 42 obs · 65% saved
 
-<session_context>
+### Session Summary
 request: Fix database connection pool
-learned: Connection pool size should be based on max connections
-</session_context>
+learned: Pool size should be based on max_connections
 
-<relevant_memories>
-- [OBSERVATION] (85%) [bash]: input: psql -c "SHOW max_connections"
-- [REFLECTION] (72%) pattern: connection-pool-tuning: Increase pool...
-</relevant_memories>
+### Relevant Memories
+- [OBSERVATION] (85%) max_connections=100
+- [REFLECTION] (72%) pattern: connection-pool-tuning
 </pg_memory>
 ```
 
-记忆被合并到 `output.system[0]`（非 push 新条目），兼容只接受单条 system message 的 vLLM/Qwen 后端。
+相比 v3.0 的改进：
+- **元认知头部**：告诉 Agent 置信度分级和如何使用记忆
+- **记忆压缩**：output-first，不再显示 raw command
+- **经济统计**：显示当前会话的 token 节省比例
+
+合并到 `output.system[0]`（非 push 新条目），兼容只接受单条 system message 的 vLLM/Qwen 后端。
 
 ---
 

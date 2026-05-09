@@ -1,6 +1,6 @@
 # 架构决策记录
 
-> 最后更新: 2026-05-08 | 对应版本: opcode-pg-memory v3.0
+> 最后更新: 2026-05-10 | 对应版本: opcode-pg-memory v3.5
 
 ---
 
@@ -67,6 +67,32 @@ TypeScript 从 `"strict": false` + 6 个独立 false flag 改为 `"strict": true
 
 为 Cursor、Windsurf、Claude Code、Continue.dev 生成 MCP 配置模板，
 位于 `platform-templates/` 目录。
+
+---
+
+### ADR-009: 短时记忆层
+
+**状态**: ✅ 已实施 (v3.5)
+
+在 LLM 和 PG 之间增加内存短时记忆层。当前会话的工具调用和用户消息
+直接缓存到 `Map<sessionId, Observation[]>`。`system.transform` 时优先
+从短时记忆读取，命中则零 PG 查询。
+
+### ADR-010: 内存队列替代 SQLite 缓冲区
+
+**状态**: ✅ 已实施 (v3.4.1)
+
+本地 PG 场景下，SQLite 持久化缓冲是过度设计。替换为纯内存队列 +
+指数退避重试（30s 间隔，max 10 次，约 5 分钟后放弃）。
+
+### ADR-011: 用户消息捕获 + 噪声过滤
+
+**状态**: ✅ 已实施 (v3.5.1~3.5.3)
+
+用户消息通过 `message.updated` 钩子捕获入库。经过三层处理：
+1. `isNoise()` 过滤问候语/纯标点/重复字符
+2. `calculateMessageImportance()` 评分 (1-5)
+3. `importance=2` 的消息 7 天后 cleanup 自动删除
 
 ---
 

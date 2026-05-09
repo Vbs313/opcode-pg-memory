@@ -1,4 +1,4 @@
-# opcode-pg-memory 插件架构详解 (v3.0)
+# opcode-pg-memory 插件架构详解 (v3.5)
 
 > PostgreSQL + pgvector 跨平台记忆系统 — 2026-05
 
@@ -6,31 +6,40 @@
 
 ## 1. 架构总览
 
-### v3.0 架构层次
+### v3.5 架构层次
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                    注入层 (src/injection/)                        │
 │  system-transform-injector   session-summary-writer              │
 │  observation-scorer          observation-cleanup                 │
-│  两路召回+混合评分            自动写入+评分+清理                    │
+│  两路召回+混合评分+记忆压缩    自动写入+评分+清理+eval             │
+├──────────────────────────────────────────────────────────────────┤
+│                  服务层 (src/services/)                           │
+│  short-term-memory.ts  memory-buffer.ts                          │
+│  Map<sessionId, Obs[]>  内存队列+指数退避                         │
+│  async-embedder.ts     logger.ts                                │
 ├──────────────────────────────────────────────────────────────────┤
 │                  基础设施层 (src/shared/)                          │
-│  paths.ts  env-manager.ts  settings-defaults.ts                  │
-│  数据目录    凭证管理+隔离     4层配置合并+Zod校验                  │
+│  paths.ts  env-manager.ts  settings-defaults.ts  errors.ts       │
+│  数据目录    凭证管理+BLOCKED    4层配置合并+Zod   6 Error 子类    │
 ├──────────────────────────────────────────────────────────────────┤
 │                    钩子层 (src/hooks/)                            │
 │  tool.execute.before/after  session.created/completed/compacting │
-│  message-updated            experimental.chat.system.transform   │
+│  message-updated (噪声过滤+重要性评分)                             │
+│  experimental.chat.system.transform                              │
 ├──────────────────────────────────────────────────────────────────┤
 │                    MCP 工具层 (src/mcp/)                          │
 │  recall_memory  hindsight_reflect  import_document               │
-│  backfill_embeddings  sync_health                                │
+│  timeline  get_memory  delete_memory                             │
+│  knowledge-corpus (7工具)  session-logger (4工具)                 │
+│  backfill_embeddings  sync_health  ← 共 19 个                    │
 ├──────────────────────────────────────────────────────────────────┤
 │                    存储层 (PostgreSQL + pgvector)                  │
 │  session_map  observations  entities  relations                  │
 │  reflections  topic_segments  semantic_cache                     │
-│  token_usage_log  session_summaries  token_economics              │
+│  token_usage_log  session_summaries  token_economics             │
+│  corpus_meta  corpus_entries                                     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -204,16 +213,23 @@ SSE (--transport sse --port 37777):
 
 ---
 
-## 7. 与 v2.x 的主要变化
+## 7. 版本演进
 
-| 维度 | v2.x | v3.0 |
-|------|------|------|
-| TypeScript strict | `false` (6 个 false flag) | `true` |
-| 配置目录 | 插件根目录 `.env` | `~/.opencode-pg-memory/.env` |
-| 配置层数 | 3 层 (env → file → default) | 4 层 (+ settings.json) |
-| 注入方式 | `chat.message` 注入 synthetic part | `experimental.chat.system.transform` 合并到 system[0] |
-| 召回策略 | 单一重要性排序 | 两路召回 + 混合评分 |
-| 凭证管理 | 散落 process.env | 统一 env-manager.ts + BLOCKED_ENV_VARS |
-| 跨平台 | 无 | 5 平台模板 + MCP SSE |
-| 测试 | 9 suites / 69 tests | 14 suites / 168 tests |
-| 环境隔离 | 无 | buildIsolatedEnv() |
+| 维度 | v2.x | v3.0 | v3.5 |
+|------|------|------|------|
+| TypeScript strict | `false` (6 flag) | `true` | `true` |
+| 配置目录 | 插件根目录 `.env` | `~/.opencode-pg-memory/.env` | 同 v3.0 |
+| 配置层数 | 3 层 | 4 层 | 4 层 |
+| 注入方式 | `chat.message` parts | `system.transform` merge system[0] | 同 v3.0 + 短时记忆优先 |
+| 召回策略 | 单一重要性排序 | 两路召回 + 混合评分 | 同 v3.0 + 冷启动检测 |
+| 记忆压缩 | 无 | 无 | `compressObservation()` output-first |
+| 短时记忆 | 无 | 无 | `short-term-memory.ts` Map 缓存 |
+| 用户消息 | 不捕获 | 不捕获 | `message-updated` 噪声过滤 + 评分入库 |
+| 韧性 | 无 | graceful fallback | 同 v3.0 + memory-buffer 队列 |
+| 凭证管理 | 散落 process.env | env-manager.ts + BLOCKED | 同 v3.0 |
+| 错误层次 | 仅有 classifier | classifier | classifier + 6 Error 子类 |
+| MCP SDK | ^0.5.0 | ^0.5.0 | ^1.29.0 |
+| 跨平台 | 无 | 5 模板 | 5 模板 |
+| MCP 工具 | 5 | 19 | 19 |
+| Agent 技能 | 0 | 3 | 3 |
+| 测试 | 9 / 69 | 14 / 168 | 15 / 172 |
