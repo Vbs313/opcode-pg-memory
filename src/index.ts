@@ -40,7 +40,7 @@ import { calculateTokenBudget, estimateTokens } from "./utils/token-budget";
 import { detectMemoryKeyword, MEMORY_NUDGE_MESSAGE } from "./services/keyword";
 import { buildInjectionBlock } from "./injection/system-transform-injector";
 import { buildAndWriteSessionSummary } from "./injection/session-summary-writer";
-import { flushBuffer } from "./services/write-behind-buffer";
+import { setPool } from "./services/memory-buffer";
 
 // ============================================================================
 // Plugin Type Definitions (matches official OpenCode Plugin API)
@@ -300,14 +300,8 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
 
-  // Periodic flush of write-behind buffer (every 30s, when PG comes back)
-  const flushTimer = setInterval(async () => {
-    try {
-      await flushBuffer(pool);
-    } catch {
-      // PG still down, buffer stays
-    }
-  }, 30_000);
+  // Initialize memory buffer with pool reference
+  setPool(pool);
 
   // Track sessions that have received memory injection
   const injectedSessions = new Set<string>();

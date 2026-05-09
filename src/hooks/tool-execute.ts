@@ -10,10 +10,7 @@ import { createLogger } from "../services/logger";
 import { getAsyncEmbedder } from "../services/async-embedder";
 import { detectAgentId } from "../services/agent-context";
 import { getConfig } from "../config";
-import {
-  bufferObservation,
-  flushBuffer,
-} from "../services/write-behind-buffer";
+import { enqueueObservation } from "../services/memory-buffer";
 
 const logger = createLogger("tool-execute");
 
@@ -287,9 +284,9 @@ export async function handleToolExecuteAfter(
       ],
     );
   } catch (error) {
-    logger.warn("PG unavailable — buffering observation locally", error);
+    logger.warn("PG unavailable — enqueuing observation in memory", error);
     try {
-      bufferObservation({
+      enqueueObservation({
         sessionMapId: sessionInternalId ?? "unknown",
         toolName: tool.name,
         toolInputSummary: null,

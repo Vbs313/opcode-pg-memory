@@ -7,7 +7,6 @@
 
 import { Pool } from "pg";
 import { createLogger } from "../services/logger";
-import { getConfig, resolveEmbeddingApiKey, resolveConfig } from "../config";
 
 const logger = createLogger("observation-scorer");
 
