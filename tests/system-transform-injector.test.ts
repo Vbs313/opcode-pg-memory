@@ -248,11 +248,12 @@ describe("formatInjectionBlock", () => {
   test("includes project when provided", () => {
     const block = formatInjectionBlock([], null, "my-project");
     expect(block).toContain("project: my-project");
+    expect(block).toContain("## Memory System");
   });
 
   test("includes session_summary when provided", () => {
     const block = formatInjectionBlock([], "Learned important things", null);
-    expect(block).toContain("<session_context>");
+    expect(block).toContain("### Session Summary");
     expect(block).toContain("Learned important things");
   });
 
@@ -267,8 +268,14 @@ describe("formatInjectionBlock", () => {
     expect(block).toContain("key insight");
   });
 
-  test("returns empty string for no memories and no summary", () => {
-    expect(formatInjectionBlock([], null, null)).toBe("");
+  test("returns empty string for no project, no memories, no summary, no economics", () => {
+    expect(formatInjectionBlock([], null, null, null)).toBe("");
+  });
+
+  test("includes meta-cognition header when project is provided", () => {
+    const block = formatInjectionBlock([], null, "test-project");
+    expect(block).toContain("## Memory System");
+    expect(block).toContain("previous sessions");
   });
 
   test("handles multiple memories with dedup scores", () => {

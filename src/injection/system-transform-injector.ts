@@ -218,12 +218,18 @@ export function formatInjectionBlock(
     estimatedReadTokens: number;
   } | null,
 ): string {
-  // Always render if we have project context, summary, or memories, or economics
   if (!project && memories.length === 0 && !sessionSummary && !economics)
     return "";
 
   const lines: string[] = [];
   lines.push("<pg_memory>");
+
+  // ── Meta-cognition header — tells the agent what this memory system is ──
+  lines.push("## Memory System");
+  lines.push(
+    "I inject relevant context from previous sessions. The format below",
+  );
+  lines.push("shows what was recalled. Higher percentage = more relevant.");
 
   if (project) {
     lines.push(`project: ${project}`);
@@ -235,20 +241,19 @@ export function formatInjectionBlock(
         ? `${Math.round((economics.savingsEstimate / (economics.estimatedReadTokens + economics.savingsEstimate)) * 100)}%`
         : "N/A";
     lines.push(
-      `economics: ${economics.totalObservations} obs | ${savingsPct} saved`,
+      `economics: ${economics.totalObservations} obs · ${savingsPct} saved`,
     );
   }
 
   if (sessionSummary) {
     lines.push("");
-    lines.push("<session_context>");
+    lines.push("### Session Summary");
     lines.push(sessionSummary);
-    lines.push("</session_context>");
   }
 
   if (memories.length > 0) {
     lines.push("");
-    lines.push("<relevant_memories>");
+    lines.push("### Relevant Memories");
     for (const m of memories) {
       const label =
         m.type === "reflection"
@@ -257,13 +262,39 @@ export function formatInjectionBlock(
             ? "ENTITY"
             : "OBSERVATION";
       const pct = (m.score * 100).toFixed(0);
-      lines.push(`- [${label}] (${pct}%) ${m.content.substring(0, 300)}`);
+      // ── Compress: show only the key insight, not raw text ──
+      const compressed = compressObservation(m.content);
+      lines.push(`- [${label}] (${pct}%) ${compressed}`);
     }
     lines.push("</relevant_memories>");
   }
 
   lines.push("</pg_memory>");
   return lines.join("\n");
+}
+
+/**
+ * Compress raw observation text into a concise narrative.
+ * Strips redundant prefixes, focuses on the output/result.
+ */
+function compressObservation(content: string): string {
+  if (!content || content.length < 60) return content;
+  // Extract the output part (after "output:" or "→")
+  const outputMatch = content.match(/(?:output|→)\s*(.+)/);
+  if (outputMatch && outputMatch[1].trim().length > 5) {
+    // Prefer output summary — it's the actual result
+    return outputMatch[1].trim().substring(0, 200);
+  }
+  // Extract the input part (after "input:")
+  const inputMatch = content.match(/input:\s*(.+?)(?:\s+output:|$)/);
+  if (inputMatch) {
+    return inputMatch[1].trim().substring(0, 200);
+  }
+  // Fallback: just take the last meaningful part
+  const parts = content.split(/\s{2,}/);
+  return (
+    parts[parts.length - 1]?.substring(0, 200) || content.substring(0, 200)
+  );
 }
 
 // ============================================================

@@ -809,7 +809,7 @@ const startTime = Date.now();
  */
 async function startSSEServer(
   server: Server,
-  pool: Pool,
+  pool: Pool | null,
   port: number,
 ): Promise<http.Server> {
   const httpServer = http.createServer(async (req, res) => {
@@ -820,11 +820,13 @@ async function startSSEServer(
       // ── Health check ──
       if (req.method === "GET" && pathname === "/health") {
         let dbOk = false;
-        try {
-          await pool.query("SELECT 1");
-          dbOk = true;
-        } catch {
-          dbOk = false;
+        if (pool) {
+          try {
+            await pool.query("SELECT 1");
+            dbOk = true;
+          } catch {
+            dbOk = false;
+          }
         }
         const health = {
           status: dbOk ? "healthy" : "degraded",
@@ -898,21 +900,25 @@ async function main() {
 
   logger.info(`Starting MCP server (transport: ${transportMode})...`);
 
-  // 初始化数据库
-  let pool: Pool;
+  // 初始化数据库（graceful fallback: 失败时仍启动，工具返回错误）
+  let pool: Pool | null = null;
+  let dbReady = false;
   try {
     pool = await initializeDatabase(dbConfig);
+    dbReady = true;
     logger.info("Database connected");
   } catch (error) {
-    logger.error("Database connection failed", error);
-    process.exit(1);
+    logger.warn(
+      "Database unavailable — tools return errors until PG is back",
+      error,
+    );
   }
 
   // 创建 MCP 服务器
   const server = new Server(
     {
       name: "opcode-pg-memory",
-      version: "2.0.0",
+      version: "3.2.0",
     },
     {
       capabilities: {
@@ -929,6 +935,22 @@ async function main() {
   // 处理工具调用请求
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+
+    // DB not ready — all tools return the same error
+    if (!dbReady || !pool) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: "Database unavailable — check PostgreSQL connection",
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
 
     if (!args) {
       return {
@@ -988,8 +1010,10 @@ async function main() {
       httpServer.close();
     }
     server.close();
-    // 2. Drain database pool
-    await pool.end().catch(() => {});
+    // 2. Drain database pool (if initialized)
+    if (pool) {
+      await pool.end().catch(() => {});
+    }
     logger.info("Shutdown complete");
     process.exit(0);
   };

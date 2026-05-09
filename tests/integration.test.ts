@@ -116,7 +116,7 @@ describe("injection pipeline (mock PG)", () => {
     expect(block).toContain("</pg_memory>");
     expect(block).toContain("project: test-project");
     expect(block).toContain("[OBSERVATION]");
-    expect(block).toContain("[bash]");
+    expect(block).toContain("## Memory System");
   });
 
   test("returns empty for empty observations", async () => {
