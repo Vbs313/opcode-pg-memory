@@ -248,8 +248,18 @@ export class DatabaseInitializer {
         source VARCHAR(512),
         source_hash VARCHAR(64),
         platform_source VARCHAR(50) DEFAULT 'opencode',
-        agent_id VARCHAR(100)
+        agent_id VARCHAR(100),
+        causal_chain_id UUID,
+        causal_role VARCHAR(10) CHECK (causal_role IN ('cause', 'fix'))
       );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_observations_platform_source
+        ON observations(platform_source);
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_observations_causal_chain
+        ON observations(causal_chain_id);
     `);
     // platform_source 索引在 createIndexes 中创建（必须在列迁移之后）
 
@@ -594,7 +604,9 @@ export class DatabaseInitializer {
         ADD COLUMN IF NOT EXISTS source VARCHAR(512),
         ADD COLUMN IF NOT EXISTS source_hash VARCHAR(64),
         ADD COLUMN IF NOT EXISTS platform_source VARCHAR(50) DEFAULT 'opencode',
-        ADD COLUMN IF NOT EXISTS agent_id VARCHAR(100)
+        ADD COLUMN IF NOT EXISTS agent_id VARCHAR(100),
+        ADD COLUMN IF NOT EXISTS causal_chain_id UUID,
+        ADD COLUMN IF NOT EXISTS causal_role VARCHAR(10)
       `);
 
       // 索引在 createIndexes 中已创建，无需重复

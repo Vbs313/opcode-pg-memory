@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import { Pool } from "pg";
 import { createLogger } from "../services/logger";
 import { getObservations } from "../services/short-term-memory";
+import { getQueueLength } from "../services/memory-buffer";
 
 const logger = createLogger("system-transform-injector");
 
@@ -218,19 +219,57 @@ export function formatInjectionBlock(
     avgImportance: number;
     estimatedReadTokens: number;
   } | null,
+  chains?: CausalChain[] | null,
 ): string {
-  if (!project && memories.length === 0 && !sessionSummary && !economics)
+  if (
+    !project &&
+    memories.length === 0 &&
+    !sessionSummary &&
+    !economics &&
+    (!chains || chains.length === 0)
+  )
     return "";
 
   const lines: string[] = [];
   lines.push("<pg_memory>");
 
-  // ── Meta-cognition header — tells the agent what this memory system is ──
+  // ── Meta-cognition header — dynamic based on system state ──
+  const bufferLen = getQueueLength();
+  const oldestAge =
+    memories.length > 0
+      ? Math.round(
+          (Date.now() -
+            Math.max(...memories.map((m) => m.createdAt.getTime()))) /
+            3600000,
+        )
+      : 0;
+
   lines.push("## Memory System");
+
+  // Degraded mode
+  if (bufferLen > 5) {
+    lines.push("⚠️ MEMORY IN DEGRADED MODE");
+    lines.push(
+      `PostgreSQL is under load. ${bufferLen} recent observations are`,
+    );
+    lines.push(
+      "buffered and not yet searchable. Older memories below are complete.",
+    );
+  }
+
+  // Base guidance
   lines.push(
     "Context from previous sessions is injected below. Use it as reference,",
   );
   lines.push("not authority — project constraints may have changed.");
+
+  // Staleness warning
+  if (oldestAge > 72) {
+    lines.push(
+      `(Oldest memory shown is from ${oldestAge}h ago — project may have changed.)`,
+    );
+  }
+
   lines.push("Guidelines:");
   lines.push("- >= 80%: high confidence, treat as confirmed knowledge");
   lines.push("- 60-79%: moderate confidence, cross-check before acting");
@@ -254,6 +293,17 @@ export function formatInjectionBlock(
     lines.push("");
     lines.push("### Session Summary");
     lines.push(sessionSummary);
+  }
+
+  if (chains && chains.length > 0) {
+    lines.push("");
+    lines.push("### Causal Chains");
+    for (const ch of chains) {
+      const cause = ch.cause.summary.substring(0, 100);
+      const fix = ch.fix.summary.substring(0, 100);
+      lines.push(`- [${ch.cause.toolName}] ❌ ${cause}`);
+      lines.push(`  [${ch.fix.toolName}] ✅ ${fix}`);
+    }
   }
 
   if (memories.length > 0) {
@@ -570,6 +620,7 @@ export async function retrieveMemoriesForInjection(
     avgImportance: number;
     estimatedReadTokens: number;
   } | null;
+  chains: CausalChain[];
 }> {
   const cfg: InjectionConfig = { ...DEFAULT_INJECTION_CONFIG, ...config };
 
@@ -589,7 +640,7 @@ export async function retrieveMemoriesForInjection(
       logger.debug(
         `Short-term memory hit: ${memories.length} observations (no PG query)`,
       );
-      return { memories, summary: null, economics: null };
+      return { memories, summary: null, economics: null, chains: [] };
     }
     logger.debug("Short-term memory empty — falling back to PG recall");
   }
@@ -692,11 +743,63 @@ export async function retrieveMemoriesForInjection(
     }
   }
 
+  // ── Retrieve causal chains ──
+  let chains: CausalChain[] = [];
+  if (input.project) {
+    chains = await retrieveCausalChains(pool, input.project);
+  }
+
   logger.info(
-    `Injection: ${sorted.length} memories + ${summary ? "summary" : "no summary"}${economics ? " + economics" : ""}`,
+    `Injection: ${sorted.length} memories${summary ? " + summary" : ""}${economics ? " + economics" : ""}${chains.length > 0 ? ` + ${chains.length} chains` : ""}`,
   );
 
-  return { memories: sorted, summary, economics };
+  return { memories: sorted, summary, economics, chains };
+}
+
+export interface CausalChain {
+  chainId: string;
+  cause: { toolName: string; summary: string; createdAt: Date };
+  fix: { toolName: string; summary: string; createdAt: Date };
+}
+
+async function retrieveCausalChains(
+  pool: Pool,
+  project: string,
+): Promise<CausalChain[]> {
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.causal_chain_id,
+              c.tool_name AS cause_tool, c.tool_input_summary AS cause_input,
+              c.tool_output_summary AS cause_output, c.created_at AS cause_time,
+              f.tool_name AS fix_tool, f.tool_input_summary AS fix_input,
+              f.tool_output_summary AS fix_output, f.created_at AS fix_time
+       FROM observations c
+       JOIN observations f ON c.causal_chain_id = f.causal_chain_id
+       LEFT JOIN session_map sm ON c.session_map_id = sm.id
+       WHERE c.causal_role = 'cause'
+         AND f.causal_role = 'fix'
+         AND sm.project_id = $1
+         AND c.created_at > NOW() - INTERVAL '90 days'
+       ORDER BY c.created_at DESC
+       LIMIT 5`,
+      [project],
+    );
+    return rows.map((r: any) => ({
+      chainId: r.causal_chain_id,
+      cause: {
+        toolName: r.cause_tool,
+        summary: r.cause_output || r.cause_input || "",
+        createdAt: r.cause_time,
+      },
+      fix: {
+        toolName: r.fix_tool,
+        summary: r.fix_output || r.fix_input || "",
+        createdAt: r.fix_time,
+      },
+    }));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -707,15 +810,13 @@ export async function buildInjectionBlock(
   pool: Pool,
   config?: Partial<InjectionConfig>,
 ): Promise<string> {
-  const { memories, summary, economics } = await retrieveMemoriesForInjection(
-    input,
-    pool,
-    config,
-  );
+  const { memories, summary, economics, chains } =
+    await retrieveMemoriesForInjection(input, pool, config);
   return formatInjectionBlock(
     memories,
     summary,
     input.project ?? null,
     economics ?? null,
+    chains ?? null,
   );
 }
