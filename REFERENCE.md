@@ -200,12 +200,19 @@ injection/
 │   ├── scoreSessionObservations()   质量分 = imp×0.4 + rec×0.3 + com×0.3
 │   ├── calculateTokenEconomics()    Token 经济统计
 │   ├── formatEconomicsDashboard()   仪表盘格式化
-│   └── evalRecall()                 自评测 recall@1/5/10
+│   └── evalRecall()                 索引健康检查 (注: 自匹配, 不适用权重调优)
 │
 └── observation-cleanup.ts           自动清理
     ├── cleanupLowValueObservations() importance≤2 + 7天
     └── getObservationStats()        统计
 ```
+
+> **注：evalRecall() 的局限性**：当前实现使用 observation 自身的 embedding 做查询，
+> 自匹配必定命中自身（除非向量索引未构建）。因此 recall@10 接近 100% 是正常现象，
+> 不反映两路召回的真实质量。此 eval 更适合作为**索引健康检查**（验证 pgvector HNSW
+> 索引是否正确构建），而非权重调优的反馈器。  
+> 如需评估权重变化的影响，需要用 observation 的 `tool_input_summary` 做查询文本，
+> 看 `tool_output_summary` 相同的记录是否被召回——这需要独立的评估数据集。
 
 ### 3.5 src/mcp/
 
@@ -604,7 +611,9 @@ node dist/mcp-server.js --transport sse --port 37777
 
 ### 8.1 注入格式
 
-```xml
+外层 `<pg_memory>` / `</pg_memory>` 标记块边界；内层为纯 Markdown 结构（无 XML 嵌套标签）。
+
+```text
 <pg_memory>
 ## Memory System
 Context from previous sessions is injected below. Use it as reference,
