@@ -43,6 +43,50 @@ const NOISE_PATTERNS = [
   /^可以$/i,
 ];
 
+/**
+ * 评估用户消息的价值 (1-5)。
+ * 高价值消息保留更久，低价值更快被 cleanup 删除。
+ */
+function calculateMessageImportance(content: string): number {
+  const trimmed = content.trim();
+  let score = 2; // 基准: 普通对话
+
+  // 长消息 → 更有价值
+  if (trimmed.length > 200) score += 1;
+  if (trimmed.length > 500) score += 1;
+
+  // 包含代码/配置 → 高价值
+  if (
+    /[{};=]|=>|->|\bfunction\b|\bconst\b|\blet\b|\bvar\b|\bdef\b|\bimport\b/.test(
+      trimmed,
+    )
+  )
+    score += 1;
+  // 包含路径/命令 → 高价值
+  if (/\/[\w-]+\/[\w.-]+|`[\w\s/-]+`/.test(trimmed)) score += 1;
+  // 包含数字参数/配置值 → 高价值
+  if (/\b\d{3,}\b|=\d+|port|host|key|token|password|url/i.test(trimmed))
+    score += 1;
+  // 包含技术术语 → 高价值
+  if (
+    /error|bug|fix|config|deploy|migrate|refactor|optimize|benchmark/i.test(
+      trimmed,
+    )
+  )
+    score += 1;
+  // 包含明确的问题 → 中等价值
+  if (
+    /[？?]|why|how|what|when|where|哪个|为什么|怎么|是否/.test(trimmed) &&
+    trimmed.length > 20
+  )
+    score += 1;
+  // 包含决策/结论 → 高价值
+  if (/决定|确认|同意|就用|采用|原因|因为|所以|因此|结论|方案/.test(trimmed))
+    score += 1;
+
+  return Math.max(1, Math.min(5, score));
+}
+
 function isNoise(content: string): boolean {
   const trimmed = content.trim();
   if (trimmed.length < 5) return true; // 过短（修复前阈值是 5）
@@ -116,6 +160,7 @@ export async function handleMessageUpdated(
     if (message.role === "user" && message.content) {
       const content = message.content.trim();
       if (content.length > 5 && !isNoise(content)) {
+        const importance = calculateMessageImportance(content);
         const truncated = content.substring(0, 1000);
         await pool.query(
           `INSERT INTO observations
@@ -125,7 +170,7 @@ export async function handleMessageUpdated(
             sessionInternalId,
             "user_message",
             truncated,
-            2, // importance=2：低于工具调用(3~5), 7 天后被 cleanup 自动删除
+            importance,
             JSON.stringify({ event: "message.updated", role: "user" }),
             getConfig().platform || "opencode",
             detectAgentId(),
@@ -137,9 +182,13 @@ export async function handleMessageUpdated(
           id: `msg-${Date.now()}`,
           toolName: "user_message",
           summary: truncated.substring(0, 200),
-          importance: 2,
+          importance,
           timestamp: new Date(),
         });
+
+        if (importance >= 4) {
+          logger.info(`High-value message stored (importance=${importance})`);
+        }
       } else if (content.length <= 5) {
         logger.debug(`Skipped short message (${content.length} chars)`);
       } else {
