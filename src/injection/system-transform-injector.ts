@@ -211,15 +211,32 @@ export function formatInjectionBlock(
   memories: MemoryResult[],
   sessionSummary: string | null,
   project: string | null,
+  economics?: {
+    savingsEstimate: number;
+    totalObservations: number;
+    avgImportance: number;
+    estimatedReadTokens: number;
+  } | null,
 ): string {
-  // Always render if we have project context, summary, or memories
-  if (!project && memories.length === 0 && !sessionSummary) return "";
+  // Always render if we have project context, summary, or memories, or economics
+  if (!project && memories.length === 0 && !sessionSummary && !economics)
+    return "";
 
   const lines: string[] = [];
   lines.push("<pg_memory>");
 
   if (project) {
     lines.push(`project: ${project}`);
+  }
+
+  if (economics && economics.totalObservations > 0) {
+    const savingsPct =
+      economics.estimatedReadTokens > 0
+        ? `${Math.round((economics.savingsEstimate / (economics.estimatedReadTokens + economics.savingsEstimate)) * 100)}%`
+        : "N/A";
+    lines.push(
+      `economics: ${economics.totalObservations} obs | ${savingsPct} saved`,
+    );
   }
 
   if (sessionSummary) {
@@ -511,6 +528,12 @@ export async function retrieveMemoriesForInjection(
 ): Promise<{
   memories: MemoryResult[];
   summary: string | null;
+  economics: {
+    savingsEstimate: number;
+    totalObservations: number;
+    avgImportance: number;
+    estimatedReadTokens: number;
+  } | null;
 }> {
   const cfg: InjectionConfig = { ...DEFAULT_INJECTION_CONFIG, ...config };
 
@@ -580,11 +603,43 @@ export async function retrieveMemoriesForInjection(
   // ── Retrieve session summary ──
   const summary = await retrieveSessionSummary(pool, input.sessionId);
 
+  // ── Retrieve token economics ──
+  let economics: {
+    savingsEstimate: number;
+    totalObservations: number;
+    avgImportance: number;
+    estimatedReadTokens: number;
+  } | null = null;
+  if (input.project) {
+    try {
+      const { rows } = await pool.query(
+        `SELECT total_observations, avg_importance, estimated_read_tokens,
+                estimated_discovery_tokens, savings_estimate
+         FROM token_economics te
+         JOIN session_map sm ON te.session_map_id = sm.id
+         WHERE sm.project_id = $1
+         ORDER BY te.calculated_at DESC
+         LIMIT 1`,
+        [input.project],
+      );
+      if (rows.length > 0) {
+        economics = {
+          savingsEstimate: rows[0].savings_estimate || 0,
+          totalObservations: rows[0].total_observations || 0,
+          avgImportance: rows[0].avg_importance || 0,
+          estimatedReadTokens: rows[0].estimated_read_tokens || 0,
+        };
+      }
+    } catch {
+      // Non-fatal: economics is optional
+    }
+  }
+
   logger.info(
-    `Injection: ${sorted.length} memories + ${summary ? "summary" : "no summary"}`,
+    `Injection: ${sorted.length} memories + ${summary ? "summary" : "no summary"}${economics ? " + economics" : ""}`,
   );
 
-  return { memories: sorted, summary };
+  return { memories: sorted, summary, economics };
 }
 
 /**
@@ -595,10 +650,15 @@ export async function buildInjectionBlock(
   pool: Pool,
   config?: Partial<InjectionConfig>,
 ): Promise<string> {
-  const { memories, summary } = await retrieveMemoriesForInjection(
+  const { memories, summary, economics } = await retrieveMemoriesForInjection(
     input,
     pool,
     config,
   );
-  return formatInjectionBlock(memories, summary, input.project ?? null);
+  return formatInjectionBlock(
+    memories,
+    summary,
+    input.project ?? null,
+    economics ?? null,
+  );
 }

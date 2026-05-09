@@ -345,3 +345,79 @@ export async function deleteCorpus(
     return { deleted: false };
   }
 }
+
+// ============================================================
+// prime_corpus — fetch corpus entries as formatted text for injection
+// ============================================================
+
+export interface PrimeCorpusInput {
+  /** Corpus name to prime */
+  name: string;
+  /** Max entries to include. Default: 10 */
+  max_items?: number;
+}
+
+export async function primeCorpus(
+  input: PrimeCorpusInput,
+  pool: Pool,
+): Promise<{ name: string; content: string; count: number }> {
+  const { name, max_items = 10 } = input;
+
+  try {
+    const meta = await pool.query(
+      `SELECT id, description FROM ${CORPUS_META_TABLE} WHERE name = $1`,
+      [name],
+    );
+    if (meta.rows.length === 0) {
+      return { name, content: "", count: 0 };
+    }
+    const corpusId = meta.rows[0].id;
+    const description = meta.rows[0].description;
+
+    const { rows } = await pool.query(
+      `SELECT o.tool_name, o.tool_input_summary, o.tool_output_summary,
+              o.importance, o.created_at, ce.score
+       FROM ${CORPUS_ENTRY_TABLE} ce
+       JOIN observations o ON ce.observation_id = o.id
+       WHERE ce.corpus_id = $1
+       ORDER BY ce.score DESC, o.created_at DESC
+       LIMIT $2`,
+      [corpusId, max_items],
+    );
+
+    if (rows.length === 0) {
+      return { name, content: "", count: 0 };
+    }
+
+    const lines: string[] = [];
+    lines.push(`<corpus name="${name}">`);
+    if (description) lines.push(`description: ${description}`);
+    for (const r of rows) {
+      const pct = Math.round((r.score || 0.5) * 100);
+      const inp = (r.tool_input_summary || "").substring(0, 150);
+      const out = (r.tool_output_summary || "").substring(0, 100);
+      lines.push(
+        `- [${r.tool_name}] (${pct}%) ${inp}${out ? ` → ${out}` : ""}`,
+      );
+    }
+    lines.push("</corpus>");
+
+    return { name, content: lines.join("\n"), count: rows.length };
+  } catch (error) {
+    logger.error(`Failed to prime corpus "${name}"`, error);
+    return { name, content: "", count: 0 };
+  }
+}
+
+/**
+ * reprime_corpus — rebuild then prime (refresh corpus entries before injecting).
+ */
+export async function reprimeCorpus(
+  input: PrimeCorpusInput,
+  pool: Pool,
+): Promise<{ name: string; content: string; count: number }> {
+  // First rebuild to refresh entries
+  await rebuildCorpus({ name: input.name }, pool);
+  // Then prime
+  return primeCorpus(input, pool);
+}

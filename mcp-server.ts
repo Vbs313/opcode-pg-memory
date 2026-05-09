@@ -37,6 +37,8 @@ import {
   listCorpora,
   rebuildCorpus,
   deleteCorpus,
+  primeCorpus,
+  reprimeCorpus,
 } from "./src/mcp/knowledge-corpus";
 import type {
   BuildCorpusInput,
@@ -353,6 +355,32 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "prime_corpus",
+    description:
+      "Fetch corpus entries as formatted text for injection into current session context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Corpus name to prime" },
+        max_items: { type: "number", default: 10, description: "Max entries" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "reprime_corpus",
+    description:
+      "Rebuild then prime a corpus (refresh entries before injecting).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Corpus name to reprime" },
+        max_items: { type: "number", default: 10, description: "Max entries" },
+      },
+      required: ["name"],
+    },
+  },
+  {
     name: "start_session",
     description:
       "Start a new named session for activity logging. Returns a session_id for use with log_message and end_session.",
@@ -656,6 +684,48 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
     }
     const result = await deleteCorpus(
       args as unknown as { name: string },
+      pool,
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  },
+
+  prime_corpus: async (args, pool) => {
+    if (!args.name) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: false, error: "Missing name" }),
+          },
+        ],
+        isError: true,
+      };
+    }
+    const result = await primeCorpus(
+      args as unknown as { name: string; max_items?: number },
+      pool,
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  },
+
+  reprime_corpus: async (args, pool) => {
+    if (!args.name) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: false, error: "Missing name" }),
+          },
+        ],
+        isError: true,
+      };
+    }
+    const result = await reprimeCorpus(
+      args as unknown as { name: string; max_items?: number },
       pool,
     );
     return {
