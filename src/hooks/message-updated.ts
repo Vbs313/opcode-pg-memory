@@ -8,6 +8,9 @@ import {
 import { estimateTokens } from "../utils/token-budget";
 import { stripPrivateContent } from "../services/privacy";
 import { createLogger } from "../services/logger";
+import { getConfig } from "../config";
+import { addObservation } from "../services/short-term-memory";
+import { detectAgentId } from "../services/agent-context";
 
 const logger = createLogger("message-updated");
 
@@ -66,7 +69,39 @@ export async function handleMessageUpdated(
 
     const sessionInternalId = sessionResult.rows[0].id;
 
-    // 3. 提取实体（异步，不阻塞主流程）
+    // 3. 存储用户消息到 PG（工具调用由 tool-execute 处理）
+    if (
+      message.role === "user" &&
+      message.content &&
+      message.content.trim().length > 5
+    ) {
+      const content = message.content.trim().substring(0, 1000);
+      await pool.query(
+        `INSERT INTO observations
+         (session_map_id, tool_name, tool_input_summary, importance, metadata, platform_source, agent_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          sessionInternalId,
+          "user_message",
+          content,
+          3,
+          JSON.stringify({ event: "message.updated", role: "user" }),
+          getConfig().platform || "opencode",
+          detectAgentId(),
+        ],
+      );
+
+      // 同时写入短时记忆（下次 LLM 调用即可零延迟注入）
+      addObservation(session.id, {
+        id: `msg-${Date.now()}`,
+        toolName: "user_message",
+        summary: content.substring(0, 200),
+        importance: 3,
+        timestamp: new Date(),
+      });
+    }
+
+    // 4. 提取实体（异步，不阻塞主流程）
     extractEntitiesAndRelations(
       sessionInternalId,
       message.content ?? "",
