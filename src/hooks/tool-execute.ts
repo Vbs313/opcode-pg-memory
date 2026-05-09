@@ -11,6 +11,7 @@ import { getAsyncEmbedder } from "../services/async-embedder";
 import { detectAgentId } from "../services/agent-context";
 import { getConfig } from "../config";
 import { enqueueObservation } from "../services/memory-buffer";
+import { addObservation } from "../services/short-term-memory";
 
 const logger = createLogger("tool-execute");
 
@@ -245,6 +246,18 @@ export async function handleToolExecuteAfter(
 
       observationId = insertResult.rows[0].id;
       logger.info("Created new observation for tool output");
+    }
+
+    // Add to short-term memory (zero-latency for next LLM call)
+    if (sessionInternalId) {
+      const summaryText = `[${tool.name}] ${outputSummary || ""}`;
+      addObservation(session.id, {
+        id: observationId ?? `st-${Date.now()}`,
+        toolName: tool.name,
+        summary: summaryText.substring(0, 200),
+        importance,
+        timestamp: new Date(),
+      });
     }
 
     // Enqueue async embedding (non-blocking)

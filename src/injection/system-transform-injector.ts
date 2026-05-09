@@ -16,6 +16,7 @@
 import crypto from "node:crypto";
 import { Pool } from "pg";
 import { createLogger } from "../services/logger";
+import { getObservations } from "../services/short-term-memory";
 
 const logger = createLogger("system-transform-injector");
 
@@ -571,6 +572,27 @@ export async function retrieveMemoriesForInjection(
   } | null;
 }> {
   const cfg: InjectionConfig = { ...DEFAULT_INJECTION_CONFIG, ...config };
+
+  // ── Short-term memory: zero-latency, no PG query ──
+  if (input.sessionId) {
+    const shortTerm = getObservations(input.sessionId);
+    if (shortTerm.length > 0) {
+      const memories: MemoryResult[] = shortTerm.map((obs) => ({
+        id: obs.id,
+        type: "observation" as const,
+        content: obs.summary,
+        score: obs.importance / 5,
+        importance: obs.importance,
+        project: input.project ?? null,
+        createdAt: obs.timestamp,
+      }));
+      logger.debug(
+        `Short-term memory hit: ${memories.length} observations (no PG query)`,
+      );
+      return { memories, summary: null, economics: null };
+    }
+    logger.debug("Short-term memory empty — falling back to PG recall");
+  }
 
   // ── Path A: Keyword recall (always, fast, DB-only) ──
   const pathAResults = await keywordRecall(

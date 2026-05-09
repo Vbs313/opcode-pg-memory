@@ -41,6 +41,7 @@ import { detectMemoryKeyword, MEMORY_NUDGE_MESSAGE } from "./services/keyword";
 import { buildInjectionBlock } from "./injection/system-transform-injector";
 import { buildAndWriteSessionSummary } from "./injection/session-summary-writer";
 import { setPool } from "./services/memory-buffer";
+import { clearSession } from "./services/short-term-memory";
 
 // ============================================================================
 // Plugin Type Definitions (matches official OpenCode Plugin API)
@@ -348,6 +349,11 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
             ctx.project?.name,
             properties.info?.summary || properties.summary,
           ).catch((err) => logger.warn("Failed to write session summary", err));
+        }
+
+        // Clear short-term memory when session is deleted
+        if (type === "session.deleted") {
+          clearSession(sid);
         }
       } catch (error) {
         console.error(`[PG Memory] Error handling event '${type}':`, error);
