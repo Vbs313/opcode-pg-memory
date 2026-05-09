@@ -86,6 +86,7 @@ OpenCode 主进程
 LLM 调用工具
   → tool.execute.before → INSERT (pending)
   → tool.execute.after  → UPDATE (output) + addObservation() → 短时记忆
+  │                    → detectCausalChain() → UPDATE causal_chain_id
   → 若 PG 失败        → enqueueObservation() → 内存队列 (指数退避重试)
 
 下次 LLM 调用
@@ -659,8 +660,15 @@ experimental.chat.system.transform
   │
   ├─ 混合评分: sim×0.5 + imp×0.3 + rec×0.2
   ├─ content_prefix 去重
+  ├─ 因果链检索: retrieveCausalChains() → 同一 project 的 fail→fix 链
   ├─ TokenBudget (500~3000)
-  ├─ formatInjectionBlock()  → 记忆压缩 + 经济学 + 元认知
+  ├─ formatInjectionBlock()
+  │   ├─ 动态元认知 (降级/积压/新鲜度)
+  │   ├─ 经济学 (token savings)
+  │   ├─ 因果链 (### Causal Chains)
+  │   ├─ 会话摘要 (### Session Summary)
+  │   ├─ 记忆压缩 (output-first)
+  │   └─ 相关记忆 (### Relevant Memories)
   └─ output.system[0] = systemContent + "\n\n" + block
 ```
 
@@ -751,11 +759,13 @@ Map<sessionId, ShortTermSession>
                    └──────┬───────┘
                           │
            ┌──────────────┼──────────────┐
-           │              │              │
-     MCP 服务器       tool-execute     system.transform
-           │              │              │
-   返回 Database       enqueue() →     短时记忆有 → 注入
-   Unavailable        内存队列          短时记忆无 → 空 (无 PG 检索)
+            │              │              │
+      MCP 服务器       tool-execute     system.transform
+           │              ├─ detectCausalChain() 短时记忆有 → 注入
+           │              │  (因果链标记          短时记忆无 → 空
+   返回 Database       │   不受 PG 影响)        (无 PG 检索)
+   Unavailable         enqueue() →
+                      内存队列 (指数退避)
            │              │
                     30s 定时 flush
                     指数退避, max 10 次
@@ -919,6 +929,7 @@ npm publish
 
 | 版本 | 说明 |
 |------|------|
+| 3.6.0 | 因果链追踪 + 动态元认知 |
 | 3.5.3 | 消息重要性评分 |
 | 3.5.2 | 噪声过滤 |
 | 3.5.1 | 用户消息捕获 |
