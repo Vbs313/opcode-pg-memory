@@ -227,9 +227,13 @@ export function formatInjectionBlock(
   // ── Meta-cognition header — tells the agent what this memory system is ──
   lines.push("## Memory System");
   lines.push(
-    "I inject relevant context from previous sessions. The format below",
+    "Context from previous sessions is injected below. Use it as reference,",
   );
-  lines.push("shows what was recalled. Higher percentage = more relevant.");
+  lines.push("not authority — project constraints may have changed.");
+  lines.push("Guidelines:");
+  lines.push("- >= 80%: high confidence, treat as confirmed knowledge");
+  lines.push("- 60-79%: moderate confidence, cross-check before acting");
+  lines.push("- < 60%: low confidence, treat as hint, verify independently");
 
   if (project) {
     lines.push(`project: ${project}`);

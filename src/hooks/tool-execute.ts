@@ -10,6 +10,10 @@ import { createLogger } from "../services/logger";
 import { getAsyncEmbedder } from "../services/async-embedder";
 import { detectAgentId } from "../services/agent-context";
 import { getConfig } from "../config";
+import {
+  bufferObservation,
+  flushBuffer,
+} from "../services/write-behind-buffer";
 
 const logger = createLogger("tool-execute");
 
@@ -130,6 +134,11 @@ export async function handleToolExecuteAfter(
 
   logger.info(`Tool execute after: ${tool.name}, success: ${result.success}`);
 
+  // Buffer vars: must be declared before the try block for catch to reference
+  let sessionInternalId: string | null = null;
+  let outputSummary: string | null = null;
+  let importance = 3;
+
   try {
     // 获取 session 内部 ID
     const sessionResult = await pool.query(
@@ -142,16 +151,16 @@ export async function handleToolExecuteAfter(
       return; // ✅ 返回 void
     }
 
-    const sessionInternalId = sessionResult.rows[0].id;
+    sessionInternalId = sessionResult.rows[0].id;
 
     // 生成输出摘要
-    const outputSummary = summarizeToolOutput(
+    outputSummary = summarizeToolOutput(
       result,
       mergedConfig.maxOutputSummaryLength,
     );
 
     // 计算重要性（基于执行结果）
-    const importance = calculateImportance(result, executionTimeMs);
+    importance = calculateImportance(result, executionTimeMs);
 
     // 更新观察记录
     const existingResult = await pool.query(
@@ -278,7 +287,27 @@ export async function handleToolExecuteAfter(
       ],
     );
   } catch (error) {
-    logger.error("Error handling tool.execute.after:", error);
+    logger.warn("PG unavailable — buffering observation locally", error);
+    try {
+      bufferObservation({
+        sessionMapId: sessionInternalId ?? "unknown",
+        toolName: tool.name,
+        toolInputSummary: null,
+        toolOutputSummary: outputSummary,
+        importance,
+        metadata: {
+          event: "tool.execute.after",
+          executionTimeMs,
+          success: result.success,
+          platform_source: getConfig().platform || "opencode",
+          agent_id: detectAgentId(),
+        },
+        platformSource: getConfig().platform || "opencode",
+        agentId: detectAgentId(),
+      });
+    } catch {
+      /* buffer also failed — log already emitted */
+    }
   }
 }
 

@@ -7,6 +7,7 @@
 
 import { Pool } from "pg";
 import { createLogger } from "../services/logger";
+import { getConfig, resolveEmbeddingApiKey, resolveConfig } from "../config";
 
 const logger = createLogger("observation-scorer");
 
@@ -257,4 +258,139 @@ export function formatEconomicsDashboard(economics: SessionEconomics): string {
     }`,
     "</token_economics>",
   ].join("\n");
+}
+
+// ============================================================
+// Eval: recall@10 self-benchmark
+// ============================================================
+
+export interface EvalResult {
+  total: number;
+  recallAt1: number;
+  recallAt5: number;
+  recallAt10: number;
+  avgScore: number;
+}
+
+/**
+ * Run recall@k evaluation on existing observations.
+ *
+ * Methodology:
+ *   1. Take 50 recent observations with embeddings as "ground truth"
+ *   2. For each, use its text as a keyword query (ILIKE)
+ *   3. Check if the observation appears in keyword-only top-k results
+ *   4. Then check semantic (pgvector) top-k results
+ *
+ * Result is two numbers: keyword recall@10 and semantic recall@10.
+ * Tune weights until both are maximized.
+ */
+export async function evalRecall(pool: Pool): Promise<{
+  keyword: EvalResult;
+  semantic: EvalResult;
+}> {
+  const { rows: samples } = await pool.query(
+    `SELECT id, tool_input_summary, tool_output_summary
+     FROM observations
+     WHERE embedding IS NOT NULL
+       AND (tool_input_summary IS NOT NULL OR tool_output_summary IS NOT NULL)
+     ORDER BY created_at DESC
+     LIMIT 50`,
+  );
+
+  if (samples.length === 0) {
+    const empty = {
+      total: 0,
+      recallAt1: 0,
+      recallAt5: 0,
+      recallAt10: 0,
+      avgScore: 0,
+    };
+    return { keyword: empty, semantic: empty };
+  }
+
+  // ── Keyword recall test ──
+  let kHits1 = 0,
+    kHits5 = 0,
+    kHits10 = 0,
+    kScore = 0;
+  // ── Semantic recall test ──
+  let sHits1 = 0,
+    sHits5 = 0,
+    sHits10 = 0,
+    sScore = 0;
+
+  for (const sample of samples) {
+    const queryText = (
+      sample.tool_output_summary ||
+      sample.tool_input_summary ||
+      ""
+    ).trim();
+    if (queryText.length < 10) continue;
+
+    // Extract a distinctive keyword (first meaningful word/tool name)
+    const keywords = queryText
+      .split(/\s+/)
+      .filter((w: string) => w.length > 3)
+      .slice(0, 3)
+      .join(" ");
+    if (!keywords) continue;
+
+    // Keyword recall: ILIKE match
+    const { rows: kwResults } = await pool.query(
+      `SELECT id FROM observations
+       WHERE (tool_input_summary ILIKE $1 OR tool_output_summary ILIKE $1)
+         AND id != $2
+       ORDER BY importance DESC, created_at DESC
+       LIMIT 10`,
+      [`%${keywords}%`, sample.id],
+    );
+    const kwIdx = kwResults.findIndex((r: any) => r.id === sample.id);
+    if (kwIdx === 0) kHits1++;
+    if (kwIdx >= 0 && kwIdx < 5) kHits5++;
+    if (kwIdx >= 0) kHits10++;
+    if (kwIdx >= 0) kScore += 1 - kwIdx / 10;
+
+    // Semantic recall: get embedding for this observation
+    // (Using stored embedding — for true eval, would re-embed queryText)
+    const embResult = await pool.query(
+      `SELECT embedding FROM observations WHERE id = $1 AND embedding IS NOT NULL`,
+      [sample.id],
+    );
+    if (embResult.rows.length === 0) continue;
+    const vector = embResult.rows[0].embedding as number[];
+    const vectorLit = `[${vector.join(",")}]`;
+
+    const { rows: semResults } = await pool.query(
+      `SELECT id, 1 - (embedding <=> $1::vector) AS similarity
+       FROM observations
+       WHERE id != $2 AND embedding IS NOT NULL
+       ORDER BY embedding <=> $1::vector
+       LIMIT 10`,
+      [vectorLit, sample.id],
+    );
+    const semIdx = semResults.findIndex((r: any) => r.id === sample.id);
+    if (semIdx === 0) sHits1++;
+    if (semIdx >= 0 && semIdx < 5) sHits5++;
+    if (semIdx >= 0) sHits10++;
+    if (semIdx >= 0) sScore += semResults[semIdx]?.similarity || 0;
+  }
+
+  const n = samples.length;
+  const round = (v: number) => Math.round(v * 100) / 100;
+  return {
+    keyword: {
+      total: n,
+      recallAt1: round((kHits1 / n) * 100),
+      recallAt5: round((kHits5 / n) * 100),
+      recallAt10: round((kHits10 / n) * 100),
+      avgScore: round((kScore / n) * 100),
+    },
+    semantic: {
+      total: n,
+      recallAt1: round((sHits1 / n) * 100),
+      recallAt5: round((sHits5 / n) * 100),
+      recallAt10: round((sHits10 / n) * 100),
+      avgScore: round((sScore / n) * 100),
+    },
+  };
 }
