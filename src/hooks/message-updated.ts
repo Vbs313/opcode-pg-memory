@@ -12,6 +12,49 @@ import { getConfig } from "../config";
 import { addObservation } from "../services/short-term-memory";
 import { detectAgentId } from "../services/agent-context";
 
+// ── 用户消息噪声过滤 ─────────────────────────────────────
+// 常见问候语和噪音模式，不存入 PG 也不注入短时记忆
+const NOISE_PATTERNS = [
+  /^hi$/i,
+  /^hello$/i,
+  /^hey$/i,
+  /^ok$/i,
+  /^okay$/i,
+  /^thanks$/i,
+  /^thank you$/i,
+  /^thx$/i,
+  /^ty$/i,
+  /^yep$/i,
+  /^yes$/i,
+  /^no$/i,
+  /^nope$/i,
+  /^sure$/i,
+  /^got it$/i,
+  /^understood$/i,
+  /^\.$/,
+  /^\.\.\.$/,
+  /^好的$/i,
+  /^嗯$/i,
+  /^知道$/i,
+  /^明白了$/i,
+  /^继续$/i,
+  /^好$/i,
+  /^行$/i,
+  /^可以$/i,
+];
+
+function isNoise(content: string): boolean {
+  const trimmed = content.trim();
+  if (trimmed.length < 5) return true; // 过短（修复前阈值是 5）
+  if (trimmed.length > 2000) return false; // 长消息不可能是噪音
+  if (NOISE_PATTERNS.some((p) => p.test(trimmed))) return true;
+  // 纯标点符号或表情
+  if (/^[\p{P}\p{S}\s]+$/u.test(trimmed)) return true;
+  // 连续重复字符（如 "啊啊啊啊啊"、"......"）
+  if (/^(.)\1{4,}$/.test(trimmed)) return true;
+  return false;
+}
+
 const logger = createLogger("message-updated");
 
 export interface MessageUpdatedHandlerConfig {
@@ -70,35 +113,38 @@ export async function handleMessageUpdated(
     const sessionInternalId = sessionResult.rows[0].id;
 
     // 3. 存储用户消息到 PG（工具调用由 tool-execute 处理）
-    if (
-      message.role === "user" &&
-      message.content &&
-      message.content.trim().length > 5
-    ) {
-      const content = message.content.trim().substring(0, 1000);
-      await pool.query(
-        `INSERT INTO observations
-         (session_map_id, tool_name, tool_input_summary, importance, metadata, platform_source, agent_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [
-          sessionInternalId,
-          "user_message",
-          content,
-          3,
-          JSON.stringify({ event: "message.updated", role: "user" }),
-          getConfig().platform || "opencode",
-          detectAgentId(),
-        ],
-      );
+    if (message.role === "user" && message.content) {
+      const content = message.content.trim();
+      if (content.length > 5 && !isNoise(content)) {
+        const truncated = content.substring(0, 1000);
+        await pool.query(
+          `INSERT INTO observations
+           (session_map_id, tool_name, tool_input_summary, importance, metadata, platform_source, agent_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            sessionInternalId,
+            "user_message",
+            truncated,
+            2, // importance=2：低于工具调用(3~5), 7 天后被 cleanup 自动删除
+            JSON.stringify({ event: "message.updated", role: "user" }),
+            getConfig().platform || "opencode",
+            detectAgentId(),
+          ],
+        );
 
-      // 同时写入短时记忆（下次 LLM 调用即可零延迟注入）
-      addObservation(session.id, {
-        id: `msg-${Date.now()}`,
-        toolName: "user_message",
-        summary: content.substring(0, 200),
-        importance: 3,
-        timestamp: new Date(),
-      });
+        // 同时写入短时记忆（下次 LLM 调用即可零延迟注入）
+        addObservation(session.id, {
+          id: `msg-${Date.now()}`,
+          toolName: "user_message",
+          summary: truncated.substring(0, 200),
+          importance: 2,
+          timestamp: new Date(),
+        });
+      } else if (content.length <= 5) {
+        logger.debug(`Skipped short message (${content.length} chars)`);
+      } else {
+        logger.debug(`Skipped noise message: "${content.substring(0, 30)}"`);
+      }
     }
 
     // 4. 提取实体（异步，不阻塞主流程）
