@@ -750,6 +750,31 @@ export async function retrieveMemoriesForInjection(
       /* non-fatal */
     }
 
+    // 全局 entities 检索（技术术语、模式名称等结构化知识）
+    try {
+      const { rows: entRows } = await pool.query(
+        `SELECT id, name, type, description, weight, LEAST(weight / 10, 1.0) AS score
+           FROM entities
+           WHERE weight >= 5  -- 高频或重要的实体
+           ORDER BY weight DESC
+           LIMIT $1`,
+        [cfg.keywordLimit],
+      );
+      for (const r of entRows) {
+        globalPaths.push({
+          id: r.id,
+          type: "entity" as const,
+          content: `${r.name}${r.description ? `: ${r.description.substring(0, 200)}` : ""} (${r.type})`,
+          score: r.score,
+          importance: Math.round(r.weight),
+          project: null,
+          createdAt: new Date(),
+        });
+      }
+    } catch {
+      /* non-fatal */
+    }
+
     // 合并全局结果（排除已经在 sorted 里的）
     const existingIds = new Set(sorted.map((m) => m.id));
     for (const r of [...globalKW, ...globalPaths]) {

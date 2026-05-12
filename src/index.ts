@@ -305,9 +305,6 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
   // Initialize memory buffer with pool reference
   setPool(pool);
 
-  // Track sessions that have received memory injection
-  const injectedSessions = new Set<string>();
-
   // Injection pipeline cache — skip PG query if system prompt hash unchanged
   // Key: sessionId, Value: { hash of system prompt, cached injection block }
   const injectionCache = new Map<
@@ -375,51 +372,8 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
       output: { message: any; parts: any[] },
     ) => {
       try {
-        // Only inject on the first message of a session
-        if (!injectedSessions.has(input.sessionID)) {
-          injectedSessions.add(input.sessionID);
-
-          logger.info("First message in session", {
-            sessionID: input.sessionID,
-          });
-
-          // Retrieve relevant facts for this session
-          const contextLimit = 128000; // default model context limit
-          const budget = calculateTokenBudget(
-            contextLimit,
-            config.tokenBudget || {},
-          );
-          const facts = await retrieveFactsForInjection(
-            input.sessionID,
-            { maxTokens: typeof budget === "number" ? budget : 2000 },
-            pool,
-            { minConfidence: 0.5, minWeight: 0.3 },
-          );
-
-          if (facts.length > 0) {
-            // Format as context block
-            const contextBlock = formatMemoryContext(facts);
-
-            // Inject as synthetic part (visible to LLM, hidden in TUI)
-            if (output.parts && Array.isArray(output.parts)) {
-              output.parts.unshift({
-                id: `prt_pgmemory-context-${Date.now()}`,
-                sessionID: input.sessionID,
-                messageID: output.message?.id || input.messageID || "",
-                type: "text",
-                text: contextBlock,
-                synthetic: true,
-              });
-              logger.info(`Injected ${facts.length} memories`, {
-                sessionID: input.sessionID,
-              });
-            }
-          } else {
-            logger.debug("No memories to inject");
-          }
-        }
-
-        // Check for memory keywords AFTER first-message injection
+        // Note: memory injection is now handled by experimental.chat.system.transform.
+        // This hook only provides keyword-based nudges as a lightweight reminder.
         const userText = output.parts
           .filter((p: any) => p.type === "text" && !p.synthetic)
           .map((p: any) => p.text || "")
