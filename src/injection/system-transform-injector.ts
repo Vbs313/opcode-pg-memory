@@ -707,6 +707,7 @@ export async function retrieveMemoriesForInjection(
 
   // ── Global fallback: 新项目跨会话记忆 ──
   // 如果项目级召回结果太少（<3条），降级到全局检索（不按项目过滤）
+  // 含 reflections 检索（模式化知识比 raw observation 更有跨项目价值）
   if (input.project && sorted.length < 3) {
     logger.debug("Project recall too sparse — trying global fallback");
     const globalKW = await keywordRecall(pool, undefined, cfg.keywordLimit);
@@ -722,6 +723,31 @@ export async function retrieveMemoriesForInjection(
         );
         globalPaths.push(...sem);
       }
+    }
+
+    // 全局 reflections 检索（模式化知识，跨项目价值最高）
+    try {
+      const { rows: refRows } = await pool.query(
+        `SELECT id, summary, pattern_type, confidence, created_at
+         FROM reflections
+         WHERE confidence >= 0.6
+         ORDER BY confidence DESC, created_at DESC
+         LIMIT $1`,
+        [cfg.keywordLimit],
+      );
+      for (const r of refRows) {
+        globalPaths.push({
+          id: r.id,
+          type: "reflection" as const,
+          content: `[${r.pattern_type || "insight"}] ${r.summary.substring(0, 300)}`,
+          score: r.confidence,
+          importance: Math.round(r.confidence * 5),
+          project: null,
+          createdAt: r.created_at,
+        });
+      }
+    } catch {
+      /* non-fatal */
     }
 
     // 合并全局结果（排除已经在 sorted 里的）
