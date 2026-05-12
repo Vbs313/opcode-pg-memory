@@ -28,6 +28,10 @@ import {
   HindsightReflectInput,
 } from "./src/mcp/hindsight-reflect";
 import { importDocument, ImportDocumentInput } from "./src/mcp/import-document";
+import {
+  applyReflection,
+  ApplyReflectionInput,
+} from "./src/mcp/apply-reflection";
 import { getMemory, GetMemoryInput } from "./src/mcp/get-memory";
 import { getTimeline, TimelineInput } from "./src/mcp/timeline";
 import { deleteMemory, DeleteMemoryInput } from "./src/mcp/delete-memory";
@@ -176,7 +180,7 @@ const TOOLS: Tool[] = [
   {
     name: "import_document",
     description:
-      "将外部文档原子性导入记忆库。删除该 source 的旧记录并插入新分块（带 embedding）。支持语义边界分块（按 markdown heading）。用于知识库同步和增量更新。",
+      "[DEPRECATED] 将外部文档原子性导入记忆库。v3.9+ 不再维护——Agent 不需要文档切片，仅操作记忆有价值。功能保留但不会继续改进。",
     inputSchema: {
       type: "object",
       properties: {
@@ -446,6 +450,22 @@ const TOOLS: Tool[] = [
         },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "apply_reflection",
+    description:
+      "将 hindsight_reflect 产出的可执行模式写入 rules.md，使 Agent 自动遵守。接收 pattern_id，检查 action_plan，追加到 ~/.config/opencode/rules.md，标记 applied_at。幂等操作。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pattern_id: {
+          type: "string",
+          description:
+            "reflections 表的 UUID，来自 hindsight_reflect 输出中的 id 字段",
+        },
+      },
+      required: ["pattern_id"],
     },
   },
 ];
@@ -787,6 +807,31 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   search_sessions: async (args, pool) => {
     const result = await searchSessions(
       args as unknown as SearchSessionsInput,
+      pool,
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  },
+
+  apply_reflection: async (args, pool) => {
+    if (!args.pattern_id) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              applied: false,
+              error: "Missing pattern_id",
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+    const result = await applyReflection(
+      args as unknown as ApplyReflectionInput,
       pool,
     );
     return {

@@ -6,23 +6,34 @@
 // Type aliases
 // ============================================================
 
-export type EntityTier = 'permanent' | 'project' | 'session';
-export type RelationType = 'belongs_to' | 'depends_on' | 'references' | 'implements' | 'uses' | 'custom';
+export type EntityTier = "permanent" | "project" | "session";
+export type RelationType =
+  | "belongs_to"
+  | "depends_on"
+  | "references"
+  | "implements"
+  | "uses"
+  | "custom";
 
 export type PluginEventType =
-  | 'session.created' | 'session.completed' | 'session.deleted'
-  | 'message.updated' | 'tool.execute.before' | 'tool.execute.after'
-  | 'session.compacted' | 'session.idle';
+  | "session.created"
+  | "session.completed"
+  | "session.deleted"
+  | "message.updated"
+  | "tool.execute.before"
+  | "tool.execute.after"
+  | "session.compacted"
+  | "session.idle";
 
-export type SyncMode = 'event-only' | 'poll-only' | 'hybrid';
+export type SyncMode = "event-only" | "poll-only" | "hybrid";
 
 export interface PluginEvent {
-  id: string;           // `${type}:${sessionId}:${timestamp}`
+  id: string; // `${type}:${sessionId}:${timestamp}`
   type: PluginEventType;
   sessionId: string;
   timestamp: number;
   version: number;
-  source: 'hook' | 'poll';
+  source: "hook" | "poll";
   data: Record<string, any>;
 }
 
@@ -88,6 +99,31 @@ export interface Reflection {
   created_at: Date;
   embedding?: number[];
   metadata: Record<string, any>;
+  /** v3.9+ 结构化可执行动作计划 */
+  action_plan?: ActionPlan | null;
+  /** v3.9+ 模式被 apply 的时间戳 */
+  applied_at?: string | null;
+}
+
+/** 结构化可执行模式 — 用于 apply_reflection 输出到 rules.md */
+export interface ActionPlan {
+  /** 触发条件 (工具+输出匹配) */
+  trigger?: {
+    tool?: string;
+    output_contains?: string[];
+    session_filters?: Record<string, string>;
+  };
+  /** 执行动作 */
+  action?: {
+    type: "template" | "rule" | "suggestion";
+    content: string;
+    target?: "tool_plan" | "system_prompt" | "rules_md";
+  };
+  /** 环境约束 */
+  constraints?: {
+    platforms?: string[];
+    agents?: string[];
+  };
 }
 
 export interface SemanticCache {
@@ -150,7 +186,7 @@ export interface TopicSegmentInfo {
 // ============================================================
 
 export interface CallerContext {
-  type: 'user' | 'omo_agent';
+  type: "user" | "omo_agent";
   current_goal?: string;
   current_session_id?: string;
 }
@@ -197,7 +233,7 @@ export interface PluginConfig {
   reflection: {
     observationThreshold: number;
     segmentThreshold: number;
-    modelSize: '7b' | '14b' | 'full';
+    modelSize: "7b" | "14b" | "full";
     offPeakHours: number[];
     enabled: boolean;
   };
@@ -270,11 +306,17 @@ export interface SessionCompletedEvent {
 }
 
 export type StandardEvent =
-  | { type: 'session.created'; sessionID: string }
-  | { type: 'tool.execute.after'; tool: string; sessionID: string; callID: string; args: any }
-  | { type: 'message.updated'; sessionID: string; messageID: string }
-  | { type: 'session.compacting'; sessionID: string }
-  | { type: 'session.completed'; sessionID: string };
+  | { type: "session.created"; sessionID: string }
+  | {
+      type: "tool.execute.after";
+      tool: string;
+      sessionID: string;
+      callID: string;
+      args: any;
+    }
+  | { type: "message.updated"; sessionID: string; messageID: string }
+  | { type: "session.compacting"; sessionID: string }
+  | { type: "session.completed"; sessionID: string };
 
 // ============================================================
 // Legacy hook types (used by hook handler functions)
@@ -298,7 +340,7 @@ export interface OpenCodeSession {
 export interface OpenCodeMessage {
   id: string;
   parentID?: string;
-  role: 'user' | 'assistant' | 'tool';
+  role: "user" | "assistant" | "tool";
   mode?: string;
   agent?: string;
   path?: { cwd: string; root: string };
@@ -323,7 +365,7 @@ export interface OpenCodeMessage {
 }
 
 export interface OpenCodeMessagePart {
-  type: 'reasoning' | 'text' | 'tool' | 'image' | 'audio';
+  type: "reasoning" | "text" | "tool" | "image" | "audio";
   text?: string;
   time?: { start: number; end?: number };
   id: string;
@@ -333,7 +375,7 @@ export interface OpenCodeMessagePart {
     name: string;
     callID: string;
     state: {
-      status: 'pending' | 'completed' | 'failed';
+      status: "pending" | "completed" | "failed";
       input: Record<string, any>;
       output?: any;
       filepath?: string;
@@ -409,7 +451,7 @@ export interface MessagePartUpdatedOutput {
 export interface SessionCompactingInput {
   session: { id: string };
   messagesToCompact: string[];
-  compactionStrategy: 'prune' | 'summarize' | 'archive';
+  compactionStrategy: "prune" | "summarize" | "archive";
 }
 
 export interface SessionCompactingOutput {
@@ -436,7 +478,7 @@ export interface SessionCompletedOutput {
 
 export interface RetrievedFact {
   id?: string;
-  type: 'entity' | 'observation' | 'reflection' | 'relation' | 'message';
+  type: "entity" | "observation" | "reflection" | "relation" | "message";
   content: string;
   tier?: EntityTier;
   tokens: number;
@@ -458,9 +500,9 @@ export interface HindsightReflectInput {
   session_id?: string;
   omo_task_id?: string;
   topic_segment_id?: string;
-  trigger_type?: 'threshold' | 'scheduled' | 'manual';
+  trigger_type?: "threshold" | "scheduled" | "manual";
   observation_threshold?: number;
-  model_size?: '7b' | '14b' | 'full';
+  model_size?: "7b" | "14b" | "full";
   aggregate?: boolean;
 }
 

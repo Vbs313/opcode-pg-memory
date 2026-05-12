@@ -92,6 +92,9 @@ export class DatabaseInitializer {
       // 5. 迁移 observations 表新增列
       await this.migrateObservationsSource(client);
 
+      // 5.5 迁移 v3.9+ 新增列（tier, action_plan, applied_at）
+      await this.migrateV39Schema(client);
+
       // 6. 创建索引（必须在列迁移之后）
       await this.createIndexes(client);
 
@@ -399,6 +402,7 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_observations_importance ON observations(importance DESC);
       CREATE INDEX IF NOT EXISTS idx_observations_created_at ON observations(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_observations_topic_segment ON observations(topic_segment_id);
+      CREATE INDEX IF NOT EXISTS idx_observations_tier ON observations(tier) WHERE tier IN ('hot', 'warm');
     `);
 
     // 查找索引 for observations.source + platform_source
@@ -422,6 +426,7 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_reflections_pattern ON reflections(pattern_type);
       CREATE INDEX IF NOT EXISTS idx_reflections_confidence ON reflections(confidence) WHERE confidence >= 0.6;
       CREATE INDEX IF NOT EXISTS idx_reflections_topic_segment ON reflections(topic_segment_id);
+      CREATE INDEX IF NOT EXISTS idx_reflections_applied ON reflections(applied_at) WHERE applied_at IS NOT NULL;
     `);
 
     // HNSW 索引 for reflections
@@ -617,6 +622,64 @@ export class DatabaseInitializer {
       }
     } catch (error) {
       this.logger.warn("Observations table check failed (non-fatal):", error);
+    }
+  }
+
+  /**
+   * 迁移 v3.9+ 新增列：
+   * - observations.tier — 存储层级 (hot/warm/cold)
+   * - reflections.action_plan — 结构化可执行动作
+   * - reflections.applied_at — 模式应用时间戳
+   */
+  private async migrateV39Schema(client: PoolClient): Promise<void> {
+    // observations: 加 tier 列
+    try {
+      await client.query("SAVEPOINT migrate_v39_obs");
+      try {
+        await client.query(`
+          ALTER TABLE observations
+          ADD COLUMN IF NOT EXISTS tier VARCHAR(10) DEFAULT 'hot'
+        `);
+        // 加 CHECK 约束（可选，失败不阻断）
+        try {
+          await client.query(`
+            ALTER TABLE observations
+            ADD CONSTRAINT IF NOT EXISTS chk_observations_tier
+            CHECK (tier IN ('hot', 'warm', 'cold'))
+          `);
+        } catch {
+          // PG < 9.2 不支持 IF NOT EXISTS for constraints — 跳过
+        }
+        await client.query("RELEASE SAVEPOINT migrate_v39_obs");
+        this.logger.info("observations.tier column added");
+      } catch (err) {
+        await client.query("ROLLBACK TO SAVEPOINT migrate_v39_obs");
+        this.logger.warn(
+          "observations.tier migration failed (non-fatal):",
+          err,
+        );
+      }
+    } catch (error) {
+      this.logger.warn("v3.9 schema migration check failed:", error);
+    }
+
+    // reflections: 加 action_plan + applied_at 列
+    try {
+      await client.query("SAVEPOINT migrate_v39_ref");
+      try {
+        await client.query(`
+          ALTER TABLE reflections
+          ADD COLUMN IF NOT EXISTS action_plan JSONB DEFAULT NULL,
+          ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ DEFAULT NULL
+        `);
+        await client.query("RELEASE SAVEPOINT migrate_v39_ref");
+        this.logger.info("reflections.action_plan + applied_at columns added");
+      } catch (err) {
+        await client.query("ROLLBACK TO SAVEPOINT migrate_v39_ref");
+        this.logger.warn("reflections migration failed (non-fatal):", err);
+      }
+    } catch (error) {
+      this.logger.warn("v3.9 schema migration check failed:", error);
     }
   }
 

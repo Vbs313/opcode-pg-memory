@@ -206,6 +206,37 @@ export function trimToTokenBudget(
 }
 
 // ============================================================
+// Active Rules (v3.9+)
+// ============================================================
+
+interface ActiveRule {
+  pattern_type: string;
+  summary: string;
+  action_plan: any;
+  applied_at: string;
+}
+
+/**
+ * 从 reflections 表读取已应用的规则。
+ * 按 applied_at DESC 取前 5 条（避免注入膨胀）。
+ */
+async function fetchActiveRules(pool: Pool): Promise<ActiveRule[]> {
+  try {
+    const { rows } = await pool.query(
+      `SELECT pattern_type, summary, action_plan, applied_at
+       FROM reflections
+       WHERE applied_at IS NOT NULL AND action_plan IS NOT NULL
+       ORDER BY applied_at DESC
+       LIMIT 5`,
+    );
+    return rows;
+  } catch (err) {
+    logger.warn("Failed to fetch active rules:", err);
+    return [];
+  }
+}
+
+// ============================================================
 // Formatter
 // ============================================================
 
@@ -220,13 +251,15 @@ export function formatInjectionBlock(
     estimatedReadTokens: number;
   } | null,
   chains?: CausalChain[] | null,
+  activeRules?: ActiveRule[] | null,
 ): string {
   if (
     !project &&
     memories.length === 0 &&
     !sessionSummary &&
     !economics &&
-    (!chains || chains.length === 0)
+    (!chains || chains.length === 0) &&
+    (!activeRules || activeRules.length === 0)
   )
     return "";
 
@@ -304,6 +337,30 @@ export function formatInjectionBlock(
       lines.push(`- [${ch.cause.toolName}] ❌ ${cause}`);
       lines.push(`  [${ch.fix.toolName}] ✅ ${fix}`);
     }
+  }
+
+  // ── Active Rules (v3.9+) ──
+  if (activeRules && activeRules.length > 0) {
+    lines.push("");
+    lines.push("### Active Rules");
+    for (const rule of activeRules) {
+      const trigger = rule.action_plan?.trigger;
+      const action = rule.action_plan?.action;
+      if (trigger?.tool) {
+        const markers = trigger.output_contains?.length
+          ? ` (output: ${trigger.output_contains.join(", ")})`
+          : "";
+        lines.push(`- When \`${trigger.tool}\`${markers}:`);
+      }
+      if (action?.content) {
+        lines.push(`  → ${action.content.substring(0, 120)}`);
+      } else {
+        lines.push(`  → ${rule.summary.substring(0, 120)}`);
+      }
+    }
+    lines.push(
+      "  (These rules are persisted in rules.md — you may follow them automatically.)",
+    );
   }
 
   if (memories.length > 0) {
@@ -903,11 +960,16 @@ export async function buildInjectionBlock(
 ): Promise<string> {
   const { memories, summary, economics, chains } =
     await retrieveMemoriesForInjection(input, pool, config);
+
+  // v3.9+: fetch applied rules from reflections table
+  const activeRules = await fetchActiveRules(pool);
+
   return formatInjectionBlock(
     memories,
     summary,
     input.project ?? null,
     economics ?? null,
     chains ?? null,
+    activeRules,
   );
 }

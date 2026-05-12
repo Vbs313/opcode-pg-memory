@@ -1,6 +1,6 @@
 import { Pool } from "pg";
 import { createLogger } from "../services/logger";
-import type { Reflection } from "../types";
+import type { Reflection, ActionPlan } from "../types";
 
 const logger = createLogger("hindsight-reflect");
 
@@ -773,6 +773,17 @@ interface LLMReflectionResult {
     confidence: number;
     source_observation_ids: string[];
     applicability?: string;
+    /** v3.9+ 结构化触发条件 */
+    trigger?: {
+      tool?: string;
+      output_contains?: string[];
+    };
+    /** v3.9+ 结构化响应动作 */
+    action?: {
+      type: "template" | "rule" | "suggestion";
+      content: string;
+      target?: "tool_plan" | "system_prompt" | "rules_md";
+    };
   }>;
   recommendations: string[];
   technical_stack?: {
@@ -838,7 +849,7 @@ function performHeuristicReflection(
     applicability: "Session context understanding",
   });
 
-  // 2. Error pattern detection
+  // 2. Error pattern detection (with trigger extraction)
   const errorObs = observations.filter(
     (obs) =>
       obs.importance >= 3 ||
@@ -847,20 +858,69 @@ function performHeuristicReflection(
       obs.tool_output_summary?.toLowerCase().includes("failed"),
   );
 
+  // Extract common error triggers: which tools produce errors and what patterns
+  const errorTools = new Map<string, { count: number; markers: Set<string> }>();
+  for (const obs of errorObs) {
+    if (!obs.tool_name) continue;
+    if (!errorTools.has(obs.tool_name)) {
+      errorTools.set(obs.tool_name, { count: 0, markers: new Set() });
+    }
+    const entry = errorTools.get(obs.tool_name)!;
+    entry.count++;
+    // Extract error markers from output
+    const out = (obs.tool_output_summary || "").toLowerCase();
+    for (const marker of [
+      "error",
+      "exception",
+      "failed",
+      "not found",
+      "syntax",
+      "cannot",
+    ]) {
+      if (out.includes(marker)) entry.markers.add(marker);
+    }
+  }
+
   if (errorObs.length >= 1) {
+    // Find the most common error-producing tool
+    let dominantTool = "";
+    let maxCount = 0;
+    for (const [tool, data] of errorTools) {
+      if (data.count > maxCount) {
+        maxCount = data.count;
+        dominantTool = tool;
+      }
+    }
+
     patterns.push({
       pattern_type: "error_pattern",
       description: `[${topicSummary}] Encountered ${errorObs.length} error situations. Review error handling patterns.`,
       confidence: 0.75,
       source_observation_ids: errorObs.map((o) => o.id).slice(0, 5),
       applicability: "Future error-prone operations",
+      trigger: dominantTool
+        ? {
+            tool: dominantTool,
+            output_contains: Array.from(
+              errorTools.get(dominantTool)?.markers || [],
+            ),
+          }
+        : undefined,
+      action:
+        dominantTool === "bash"
+          ? {
+              type: "rule",
+              content: `When ${dominantTool} reports errors, retry with verbose output and capture the full error log before proposing fixes.`,
+              target: "system_prompt",
+            }
+          : undefined,
     });
     recommendations.push(
       `[${topicSummary}] Consider adding more robust error handling and validation.`,
     );
   }
 
-  // 3. Tool preference detection (>= 3 uses)
+  // 3. Tool preference + workflow detection (>= 3 uses)
   const toolUsage: Record<string, { count: number; ids: string[] }> = {};
   for (const obs of observations) {
     if (obs.tool_name && obs.tool_name !== "user_message") {
@@ -878,12 +938,42 @@ function performHeuristicReflection(
 
   for (const [toolName, data] of sortedTools) {
     const pct = Math.round((data.count / observations.length) * 100);
+
+    // Extract common patterns for this tool
+    const outputHints: string[] = [];
+    for (const obsId of data.ids.slice(0, 10)) {
+      const obs = observations.find((o) => o.id === obsId);
+      if (!obs?.tool_output_summary) continue;
+      const out = obs.tool_output_summary.toLowerCase();
+      if (out.includes("success") || out.includes("done")) {
+        outputHints.push("completion");
+        break;
+      }
+      if (
+        out.includes("added") ||
+        out.includes("changed") ||
+        out.includes("created")
+      ) {
+        if (!outputHints.includes("modification"))
+          outputHints.push("modification");
+      }
+    }
+
     patterns.push({
       pattern_type: data.count >= 5 ? "tool_preference" : "workflow",
       description: `[${topicSummary}] ${toolName} used ${data.count} times (${pct}% of session).`,
       confidence: Math.min(0.5 + data.count * 0.05, 0.95),
       source_observation_ids: data.ids.slice(0, 5),
       applicability: "Similar development tasks",
+      trigger: {
+        tool: toolName,
+        output_contains: outputHints.length > 0 ? outputHints : undefined,
+      },
+      action: {
+        type: "suggestion",
+        content: `Tool ${toolName} accounts for ${pct}% of operations. Consider planning to minimize context switching.`,
+        target: "system_prompt",
+      },
     });
   }
 
@@ -905,7 +995,7 @@ function performHeuristicReflection(
     });
   }
 
-  // 4. Technical stack detection
+  // 5. Technical stack detection
   const techStack = detectTechnicalStack(observations);
   if (techStack.languages.length > 0 || techStack.frameworks.length > 0) {
     patterns.push({
@@ -943,6 +1033,12 @@ async function storeReflection(
     confidence: number;
     source_observation_ids: string[];
     applicability?: string;
+    trigger?: { tool?: string; output_contains?: string[] };
+    action?: {
+      type: "template" | "rule" | "suggestion";
+      content: string;
+      target?: string;
+    };
   },
   segment: SegmentGroup,
   scope: ReflectionScope,
@@ -968,6 +1064,15 @@ async function storeReflection(
       isAggregate,
     };
 
+    // Build action_plan JSONB from trigger/action if present
+    const actionPlan: ActionPlan | undefined =
+      pattern.trigger || pattern.action
+        ? {
+            trigger: pattern.trigger || undefined,
+            action: pattern.action as ActionPlan["action"],
+          }
+        : undefined;
+
     let insertResult: any;
 
     // Try new-schema INSERT first (with session_map_id, topic_segment_id)
@@ -977,8 +1082,8 @@ async function storeReflection(
           `INSERT INTO reflections (
              session_map_id, topic_segment_id,
              summary, source_observation_ids,
-             confidence, pattern_type, metadata
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+             confidence, pattern_type, metadata, action_plan
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id`,
           [
             segment.sessionMapIds[0],
@@ -988,6 +1093,7 @@ async function storeReflection(
             pattern.confidence,
             pattern.pattern_type,
             JSON.stringify(metadata),
+            actionPlan ? JSON.stringify(actionPlan) : null,
           ],
         );
       } catch (insertErr: any) {
@@ -1035,6 +1141,7 @@ async function storeReflection(
       pattern_type: pattern.pattern_type,
       created_at: new Date(),
       metadata,
+      action_plan: actionPlan,
     };
   } catch (error) {
     logger.error("Failed to store reflection:", error);

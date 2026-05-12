@@ -1,28 +1,31 @@
-# opcode-pg-memory 插件架构详解 (v3.9)
+# opcode-pg-memory 插件架构详解 (v3.9+)
 
-> PostgreSQL + pgvector 跨平台记忆系统 — 2026-05
+> PostgreSQL + pgvector 跨平台记忆系统 — 行为进化引擎
 
 ---
 
 ## 1. 架构总览
 
-### v3.5 架构层次
+### v3.9+ 架构层次
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
+│                    行为层 (NEW v3.9)                              │
+│  apply-reflection → rules.md → Active Rules → Agent 行为改变      │
+│  ~/.config/opencode/rules.md 持久化,  system.transform 自动注入    │
+├──────────────────────────────────────────────────────────────────┤
 │                    注入层 (src/injection/)                        │
 │  system-transform-injector   session-summary-writer              │
 │  observation-scorer          observation-cleanup                 │
-│  两路召回+混合评分+记忆压缩    自动写入+评分+清理+eval             │
+│  两路召回+混合评分+记忆压缩    自动写入+评分+清理+Active Rules      │
 ├──────────────────────────────────────────────────────────────────┤
 │                  服务层 (src/services/)                           │
 │  short-term-memory.ts  memory-buffer.ts                          │
 │  Map<sessionId, Obs[]>  内存队列+指数退避                         │
-│  async-embedder.ts     logger.ts                                │
+│  async-embedder.ts     logger.ts  output-compressor.ts            │
 ├──────────────────────────────────────────────────────────────────┤
-│                  基础设施层 (src/shared/)                          │
-│  paths.ts  env-manager.ts  settings-defaults.ts  errors.ts       │
-│  数据目录    凭证管理+BLOCKED    4层配置合并+Zod   6 Error 子类    │
+│                  配置层 (src/config.ts)                            │
+│  process.env 单例  getConfig()  resolveEmbeddingApiKey()          │
 ├──────────────────────────────────────────────────────────────────┤
 │                    钩子层 (src/hooks/)                            │
 │  tool.execute.before/after  session.created/completed/compacting │
@@ -30,27 +33,25 @@
 │  experimental.chat.system.transform                              │
 ├──────────────────────────────────────────────────────────────────┤
 │                    MCP 工具层 (src/mcp/)                          │
-│  recall_memory  hindsight_reflect  import_document               │
-│  timeline  get_memory  delete_memory                             │
+│  recall_memory  hindsight_reflect  apply_reflection [NEW]        │
+│  import_document [DEPRECATED]  timeline  get_memory  delete_memory│
 │  knowledge-corpus (7工具)  session-logger (4工具)                 │
 │  backfill_embeddings  sync_health  ← 共 19 个                    │
 ├──────────────────────────────────────────────────────────────────┤
 │                    存储层 (PostgreSQL + pgvector)                  │
-│  session_map  observations  entities  relations                  │
-│  reflections  topic_segments  semantic_cache                     │
-│  token_usage_log  session_summaries  token_economics             │
-│  corpus_meta  corpus_entries                                     │
+│  session_map  observations(tier)  entities  relations            │
+│  reflections(action_plan,applied_at)  topic_segments             │
+│  semantic_cache  token_usage_log  session_summaries              │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 ### 设计原则
 
-1. **配置单一来源** — 所有字段由 `Zod schema` 定义类型和默认值，消除手动 `as` 双重维护
-2. **凭证与配置分离** — `.env` 只存 API keys / DB 密码，非敏感配置走 `settings.json`
-3. **子进程隔离** — `BLOCKED_ENV_VARS` 防止父进程凭据泄露
-4. **非阻塞** — 所有钩子 `try/catch`，不影响主流程
-5. **`strict: true`** — 零隐式 any，零 null 不安全访问
-6. **注册表派发** — `TOOL_HANDLERS` 替代 if-chain，新增工具只需一行
+1. **配置单一来源** — `src/config.ts` 从 process.env 惰性加载
+2. **非阻塞** — 所有钩子 `try/catch`，不影响主流程
+3. **`strict: true`** — 零隐式 any，零 null 不安全访问
+4. **注册表派发** — `TOOL_HANDLERS` 替代 if-chain，新增工具只需一行
+5. **行为闭环** — 反思 → 结构化 → 应用 → 注入 → 行为改变，不依赖外部 UI
 
 ---
 
@@ -224,10 +225,56 @@ SSE (--transport sse --port 37777):
 | 短时记忆 | 无 | 无 | `short-term-memory.ts` Map 缓存 |
 | 用户消息 | 不捕获 | 不捕获 | `message-updated` 噪声过滤 + 评分入库 |
 | 韧性 | 无 | graceful fallback | 同 v3.0 + memory-buffer 队列 |
-| 凭证管理 | 散落 process.env | env-manager.ts + BLOCKED | 同 v3.0 |
-| 错误层次 | 仅有 classifier | classifier | classifier + 6 Error 子类 |
+| 错误层次 | 仅有 classifier | classifier | 内联 error.message |
 | MCP SDK | ^0.5.0 | ^0.5.0 | ^1.29.0 |
 | 跨平台 | 无 | 5 模板 | 5 模板 |
-| MCP 工具 | 5 | 19 | 19 |
+| MCP 工具 | 5 | 19 | 19 (含 apply_reflection) |
 | Agent 技能 | 0 | 3 | 3 |
-| 测试 | 9 / 69 | 14 / 168 | 15 / 172 |
+| 测试 | 9 / 69 | 14 / 168 | 14 / ~168 |
+| 行为闭环 | ❌ | ❌ | ✅ apply_reflection + Active Rules |
+
+---
+
+## 7. 行为闭环 (v3.9+)
+
+### 7.1 概念
+
+从"只储存不改变"升级为"储存 → 结构化 → 应用 → 行为改变"：
+
+```
+┌──────────────┐     ┌────────────────┐     ┌─────────────────┐
+│ hindsight    │────→│ action_plan    │────→│ apply_reflection│
+│ _reflect     │     │ (trigger+action)│     │ (MCP tool)       │
+└──────────────┘     └────────────────┘     └────────┬────────┘
+                                                     │
+                                                     ▼
+┌──────────────┐     ┌────────────────┐     ┌─────────────────┐
+│ Agent 遵守   │←────│ Active Rules   │←────│ rules.md 持久化  │
+│ 规则行为改变  │     │ 自动注入        │     │ + applied_at     │
+└──────────────┘     └────────────────┘     └─────────────────┘
+```
+
+### 7.2 关键文件
+
+| 文件 | 作用 |
+|------|------|
+| `src/mcp/apply-reflection.ts` | MCP 工具：读 reflection → 写 rules.md → 标记 applied_at |
+| `~/.config/opencode/rules.md` | 持久化规则文件，Agent 每次 LLM 调用读取 |
+| `src/injection/system-transform-injector.ts` | Active Rules 注入（fetchActiveRules + format） |
+| `~/.config/opencode/command/pg-memory-apply.md` | `/pg-memory-apply` 命令 |
+
+### 7.3 注入格式
+
+```
+### Active Rules
+- When `edit` (output: error):
+  → When edit reports errors, retry with verbose output before fixing.
+  (These rules are persisted in rules.md — you may follow them automatically.)
+```
+
+### 7.4 策略
+
+- **保守**：只写入 `reflections` 表中 `confidence >= 0.6` 的模式
+- **幂等**：已标记 `applied_at` 的 pattern 不会重复写入
+- **可逆**：只追加 `rules.md`，不删除已有规则
+- **非阻塞**：所有失败 `try/catch` 返回结构化错误

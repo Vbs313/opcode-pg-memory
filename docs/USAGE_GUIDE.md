@@ -1,6 +1,6 @@
-# opcode-pg-memory v3.5 使用指南
+# opcode-pg-memory v3.9+ 使用指南
 
-> 更新至 v3.5 | strict:true | 短时记忆 | 两路召回 | 噪声过滤 | 跨平台 MCP
+> 更新至 v3.9 | strict:true | Actionable Patterns | apply_reflection | Active Rules | 分层存储
 
 完整的架构和配置参考请见 `REFERENCE.md`。
 
@@ -156,13 +156,33 @@ PG_PASSWORD=your_password
 | `session_id` | string | 指定会话 ID |
 | `trigger_type` | `threshold\|scheduled\|manual` | 触发类型 |
 
-### import_document — 文档导入
+### import_document — 文档导入 [DEPRECATED v3.9]
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `source` | string | 文档唯一标识 |
 | `content` | string | 文档内容（纯文本） |
 | `chunk_size` | number | 分块大小，默认 1500 |
+
+> v3.9 起标记为 deprecated。Agent 不需要文档切片，仅操作记忆有价值。功能保留但不再改进。
+
+### apply_reflection — 应用规则 [NEW v3.9]
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `pattern_id` | string | reflections 表 UUID（来自 hindsight_reflect 输出的 `id`） |
+
+将可执行的反思模式（含 action_plan）写入 `~/.config/opencode/rules.md`，
+标记 `applied_at`。下次 LLM 调用时，该规则通过 **Active Rules** 自动注入到 Agent 上下文。
+
+### 其他 MCP 工具
+
+完整列表见 REFERENCE.md 第 6 章，共 **19 个工具**：
+`recall_memory`, `hindsight_reflect`, `apply_reflection`, `import_document`,
+`get_memory`, `delete_memory`, `timeline`,
+`build_corpus`, `query_corpus`, `list_corpora`, `rebuild_corpus`,
+`delete_corpus`, `prime_corpus`, `reprime_corpus`,
+`start_session`, `log_message`, `end_session`, `search_sessions`
 
 ---
 
@@ -179,13 +199,12 @@ v3.0 核心功能：每次 LLM 调用前，通过 `experimental.chat.system.tran
 合并 → 混合排序 → 去重 → TokenBudget → 注入 system[0]
 ```
 
-### 注入格式 (v3.5)
+### 注入格式 (v3.9)
 
 ```xml
 <pg_memory>
 ## Memory System
-Context from previous sessions is injected below. Use it as reference,
-not authority — project constraints may have changed.
+...
 Guidelines:
 - >= 80%: high confidence, treat as confirmed knowledge
 - 60-79%: moderate confidence, cross-check before acting
@@ -197,10 +216,32 @@ economics: 42 obs · 65% saved
 request: Fix database connection pool
 learned: Pool size should be based on max_connections
 
+### Active Rules (v3.9+)
+- When `edit` (output: error):
+  → When edit reports errors, retry with verbose output before fixing.
+  (These rules are persisted in rules.md — you may follow them automatically.)
+
 ### Relevant Memories
 - [OBSERVATION] (85%) max_connections=100
 - [REFLECTION] (72%) pattern: connection-pool-tuning
 </pg_memory>
+```
+
+### Active Rules 自动注入 (v3.9+)
+
+应用 `apply_reflection` 后，已标记的规则在每次 LLM 调用时自动注入。
+规则来源：`reflections WHERE applied_at IS NOT NULL AND action_plan IS NOT NULL`
+
+Agent 直接在上下文中看到规则，无需显式调用 `recall_memory`。
+
+### 行为闭环
+
+```
+hindsight_reflect → action_plan  →  apply_reflection
+                                    → rules.md 持久化
+                                    → applied_at 标记
+                                    → 下次 LLM 调用自动注入 Active Rules
+                                    → Agent 自动遵守规则
 ```
 
 相比 v3.0 的改进：
