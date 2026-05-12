@@ -99,20 +99,15 @@ opcode-pg-memory/
 │   │   ├── logger.ts                # 日志
 │   │   └── ...
 │   │
-│   ├── shared/                      # 基础设施
-│   │   ├── paths.ts                 # ~/.opencode-pg-memory/
-│   │   ├── env-manager.ts           # 凭证管理 + BLOCKED_ENV_VARS
-│   │   ├── settings-defaults.ts     # 4 层配置合并 + Zod
-│   │   └── errors.ts                # Error 类层次 (6 子类)
+│   ├── config.ts                     # 配置入口 (process.env 单例)
 │   │
 │   └── utils/
 │       ├── embedding.ts             # Embedding 服务 (Ollama/OpenAI/DeepSeek)
-│       ├── error-classifier.ts      # 错误分类 (7 类 × 20+ 模式)
 │       └── token-budget.ts          # Token 预算
 │
 ├── mcp-server.ts                    # MCP 服务器 (stdio + SSE + /health)
 ├── index.ts                         # 插件导出入口
-├── tests/                           # 172 个测试
+├── tests/                           # 测试 (14 套)
 ├── skills/                          # 3 Agent 技能
 ├── platform-templates/              # 5 平台 MCP 模板
 └── docs/

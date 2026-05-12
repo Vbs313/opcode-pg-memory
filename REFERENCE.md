@@ -275,36 +275,23 @@ services/
 └── privacy.ts                隐私过滤
 ```
 
-### 3.7 src/shared/
+### 3.7 src/config.ts (原 src/shared/ — 已合并简化)
+
+配置层已简化为单文件 `src/config.ts`，从 process.env 直接读取：
 
 ```
-shared/
-├── paths.ts                  统一路径
-│   ├── DATA_DIR           — ~/.opencode-pg-memory/
-│   ├── ENV_FILE_PATH      — ~/.opencode-pg-memory/.env
-│   └── SETTINGS_FILE_PATH — ~/.opencode-pg-memory/settings.json
-│
-├── env-manager.ts            凭证管理
-│   ├── loadDotEnv()          — 从 .env 加载
-│   ├── saveDotEnv()          — 仅写白名单字段
-│   ├── buildIsolatedEnv()    — 子进程隔离环境
-│   ├── BLOCKED_ENV_VARS      — 5 条 (API keys + PG_PASSWORD)
-│   ├── resolveConfig()       — process.env → .env → fallback
-│   └── resolveEmbeddingApiKey() — 按 provider 选 key
-│
-├── settings-defaults.ts      配置合并 (4 层)
-│   ├── process.env → settings.json → pg-memory.jsonc → Zod 默认
-│   └── SettingsSchema        26 个字段
-│
-└── errors.ts                 错误层次
-    ├── PgMemoryError (基类)
-    ├── ConnectionError        — PG 连接失败
-    ├── QueryError             — SQL 错误
-    ├── EmbeddingError         — 嵌入 API 失败
-    ├── ConfigurationError     — 配置缺失
-    ├── DataIntegrityError     — 约束违反
-    └── ExternalServiceError   — 外部服务
+config.ts                    统一配置入口
+├── getConfig()              — 单例，惰性加载 process.env
+├── getDatabaseConfig()      — 数据库连接参数
+├── getEmbeddingConfig()     — 嵌入模型参数
+├── resolveEmbeddingApiKey() — 按 provider 选 API key
+└── resolveConfig()          — 取任意环境变量
 ```
+
+配置优先级: process.env > 硬编码默认值
+
+原有独立模块 (`shared/{paths,env-manager,settings-defaults,errors}.ts`) 为 v2.5 引入的复杂层叠配置方案，
+实际未被任何消费者使用，已在 v3.9 清理。核心功能 (resolveConfig / resolveEmbeddingApiKey) 内联回 config.ts。
 
 ### 3.8 src/utils/
 
@@ -314,11 +301,6 @@ utils/
 │   ├── EmbeddingService      — Ollama/OpenAI/DeepSeek 统一接口
 │   ├── createEmbeddingService(params)  — 从配置创建
 │   └── getEmbeddingService() — 单例 (从 config 读取)
-│
-├── error-classifier.ts       错误分类 (7 类 × 20+ 模式)
-│   ├── classifyError()       — 字符串模式匹配
-│   ├── guard()               — 异步包装
-│   └── guardSync()           — 同步包装
 │
 └── token-budget.ts           Token 预算
     └── calculateTokenBudget() — clamp(ctx×5%, 500, 4000)
@@ -876,11 +858,7 @@ dist/
 ```
 tests/
 ├── system-transform-injector.test.ts    58 tests  — 注入引擎纯函数
-├── settings-defaults.test.ts             20 tests  — 配置合并
 ├── token-budget.test.ts                   — Token 预算
-├── config.test.ts                         6 tests  — 构建配置
-├── env-manager.test.ts                    7 tests  — 环境变量
-├── error-classifier.test.ts               — 错误分类
 ├── observation-scorer.test.ts             2 tests  — 评分格式化
 ├── observation-cleanup.test.ts            4 tests  — 配置验证
 ├── session-summary-writer.test.ts         2 tests  — 模块导出

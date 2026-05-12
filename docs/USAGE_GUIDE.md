@@ -48,7 +48,7 @@ bun run build
 插件首次启动时自动创建所有表结构。如需手动初始化：
 
 ```bash
-psql -U opencode -d PGOMO -f script/migration-v2.sql
+# 数据库已由 init-db.ts 自动初始化，无需手动执行 SQL
 ```
 
 ### 注册到 OpenCode
@@ -287,7 +287,7 @@ SELECT * FROM token_economics ORDER BY calculated_at DESC LIMIT 10;
 | 现象 | 原因 | 解决 |
 |------|------|------|
 | `ECONNREFUSED` | PostgreSQL 未运行 | `pg_isready` 检查 |
-| `relation "observations" does not exist` | 数据库未初始化 | 插件首次启动自动建表，或手动运行 `script/migration-v2.sql` |
+| `relation "observations" does not exist` | 数据库未初始化 | 插件首次启动自动建表（init-db.ts 内置迁移） |
 | `Model not found: xxx` | Provider API key 未配置 | 检查 `~/.opencode-pg-memory/.env` |
 | 无记忆注入 | `experimental.chat.system.transform` 未注册 | 确认 `opencode.jsonc` plugin 列表包含 `opcode-pg-memory` |
 | `output.system[0]` 为空 | 配置层未读取到数据 | 检查 `PG_MEMORY_LOG_LEVEL=debug` 查看详细日志 |

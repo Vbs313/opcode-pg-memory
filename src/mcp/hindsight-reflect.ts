@@ -952,7 +952,11 @@ async function storeReflection(
 ): Promise<Reflection | null> {
   try {
     const isAggregate = segment.segmentId === "__aggregate__";
-    const topicSegmentId = isAggregate ? null : segment.segmentId || null;
+    // __no_segment__ means no real topic_segment — pass null for the UUID column
+    const topicSegmentId =
+      isAggregate || segment.segmentId === "__no_segment__"
+        ? null
+        : segment.segmentId || null;
 
     const metadata = {
       applicability: pattern.applicability,
@@ -971,13 +975,12 @@ async function storeReflection(
       try {
         insertResult = await pool.query(
           `INSERT INTO reflections (
-             session_id, session_map_id, topic_segment_id,
+             session_map_id, topic_segment_id,
              summary, source_observation_ids,
              confidence, pattern_type, metadata
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id`,
           [
-            scope.opencodeSessionIds[0] || null,
             segment.sessionMapIds[0],
             topicSegmentId,
             pattern.description,
@@ -987,9 +990,13 @@ async function storeReflection(
             JSON.stringify(metadata),
           ],
         );
-      } catch {
-        // New columns may not exist yet — fall through to legacy INSERT
-        logger.warn("New schema INSERT failed, falling back to legacy");
+      } catch (insertErr: any) {
+        logger.warn(
+          `New schema INSERT failed: ${insertErr?.message || insertErr}. ` +
+            `sessionMapIds=[${segment.sessionMapIds.join(",")}] ` +
+            `topicSegmentId=${topicSegmentId} ` +
+            `opencodeSessionIds=[${scope.opencodeSessionIds.join(",")}]`,
+        );
       }
     }
 
@@ -997,12 +1004,12 @@ async function storeReflection(
     if (!insertResult && scope.sessionInternalIds.length > 0) {
       insertResult = await pool.query(
         `INSERT INTO reflections (
-           session_id, summary, source_observation_ids,
+           session_map_id, summary, source_observation_ids,
            confidence, pattern_type, metadata
          ) VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id`,
         [
-          scope.sessionInternalIds[0],
+          scope.sessionMapIds[0] || null,
           pattern.description,
           pattern.source_observation_ids,
           pattern.confidence,

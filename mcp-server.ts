@@ -57,7 +57,6 @@ import type {
   SearchSessionsInput,
 } from "./src/mcp/session-logger";
 import { createLogger } from "./src/services/logger";
-import { classifyError } from "./src/utils/error-classifier";
 import { getDatabaseConfig } from "./src/config";
 
 const logger = createLogger("mcp-server");
@@ -972,11 +971,8 @@ async function main() {
       if (!handler) throw new Error(`Unknown tool: ${name}`);
       return await handler(args as Record<string, unknown>, pool);
     } catch (error) {
-      const classified = classifyError(error);
-      logger.error(
-        `${classified.severity.toUpperCase()} [${classified.category}] ${classified.message}`,
-      );
-      if (classified.suggestion) logger.info(`→ ${classified.suggestion}`);
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      logger.error(`ERROR: ${msg}`);
       return {
         content: [
           {

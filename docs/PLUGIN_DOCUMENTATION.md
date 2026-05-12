@@ -199,17 +199,15 @@ SSE (--transport sse --port 37777):
 
 ## 6. 错误处理
 
-`error-classifier.ts` 将错误分为 7 类 × 20+ 模式：
-
-| 类别 | 示例模式 |
-|------|----------|
-| `connection` | ECONNREFUSED, ETIMEDOUT, getaddrinfo |
-| `fatal` | 认证失败、数据库不存在 |
-| `recoverable` | 死锁、超时 |
-| `query` | 语法错误、列不存在 |
-| `internal` | 未知异常 |
-
 所有钩子使用 `try/catch` 包裹，日志输出后继续执行，不阻断主流程。
+
+`mcp-server.ts` 中的分类已在 v3.9 简化为 `error instanceof Error ? error.message : "Unknown error"`。
+
+| 类别 | 说明 |
+|------|------|
+| 数据库连接 | `ECONNREFUSED`, `ETIMEDOUT` → `pg_isready` 检查 |
+| 查询错误 | 列不存在、语法错误 → 检查 schema 迁移 |
+| 其他 | 记录到 `reflection_errors` 表 |
 
 ---
 

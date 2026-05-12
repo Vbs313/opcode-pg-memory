@@ -1,106 +1,81 @@
 /**
- * config.ts — 统一配置入口（薄封装层）
+ * config.ts — 统一配置入口
  *
- * 底层实现迁移至 src/shared/：
- *   - settings-defaults.ts: 4 层配置合并 + Zod 校验
- *   - env-manager.ts: .env 文件 + BLOCKED_ENV_VARS + 隔离环境
- *   - paths.ts: 数据目录 + 文件路径
- *
- * 保持此文件的导出签名不变，确保现有 import 不中断。
- *
- * 配置优先级（由高到低）:
- *   1. process.env (运行时注入)
- *   2. ~/.opencode-pg-memory/settings.json (数据目录)
- *   3. ~/.config/opencode/pg-memory.json[c] (OpenCode 配置目录)
- *   4. 硬编码默认值
+ * 从 process.env 读取配置，提供 getConfig() 单例。
+ * 配置优先级: process.env > 默认值
  */
 
-import {
-  getSettings,
-  SettingsSchema,
-  type Settings,
-} from "./shared/settings-defaults";
-import {
-  loadDotEnv,
-  saveDotEnv,
-  resolveConfig,
-  resolveEmbeddingApiKey,
-  buildIsolatedEnv,
-  BLOCKED_ENV_VARS,
-  type PgMemoryEnv,
-} from "./shared/env-manager";
-import { clearSettingsCache } from "./shared/settings-defaults";
-import {
-  DATA_DIR,
-  ENV_FILE_PATH,
-  SETTINGS_FILE_PATH,
-  LOCAL_DB_PATH,
-  LOGS_DIR,
-  ensureAllDirs,
-} from "./shared/paths";
+interface PgMemoryConfig {
+  pgHost: string;
+  pgPort: number;
+  pgDatabase: string;
+  pgUser: string;
+  pgPassword: string;
+  embeddingProvider: string;
+  embeddingModel: string;
+  embeddingDimensions: number;
+  embeddingBatchSize: number;
+  logLevel: string;
+  platform: string;
+  omoEnabled: boolean;
+}
 
-// ── Re-export for backward compatibility ──
-
-export { SettingsSchema as ConfigSchema, type Settings as PgMemoryConfig };
-
-export type { PgMemoryEnv };
-
-export {
-  loadDotEnv,
-  saveDotEnv,
-  resolveConfig,
-  resolveEmbeddingApiKey,
-  buildIsolatedEnv,
-  BLOCKED_ENV_VARS,
-  DATA_DIR,
-  ENV_FILE_PATH,
-  SETTINGS_FILE_PATH,
-  LOCAL_DB_PATH,
-  LOGS_DIR,
-  ensureAllDirs,
+const DEFAULTS: PgMemoryConfig = {
+  pgHost: "localhost",
+  pgPort: 5432,
+  pgDatabase: "opencode_memory",
+  pgUser: "opencode",
+  pgPassword: "",
+  embeddingProvider: "ollama",
+  embeddingModel: "qwen3-embedding:0.6b",
+  embeddingDimensions: 1024,
+  embeddingBatchSize: 10,
+  logLevel: "info",
+  platform: "opencode",
+  omoEnabled: false,
 };
 
-// ── Singleton config accessors ──
+let _config: PgMemoryConfig | null = null;
 
-let _config: Settings | null = null;
+function loadFromEnv(): PgMemoryConfig {
+  return {
+    pgHost: process.env.PG_HOST || DEFAULTS.pgHost,
+    pgPort: parseInt(process.env.PG_PORT || String(DEFAULTS.pgPort), 10),
+    pgDatabase: process.env.PG_DATABASE || DEFAULTS.pgDatabase,
+    pgUser: process.env.PG_USER || DEFAULTS.pgUser,
+    pgPassword: process.env.PG_PASSWORD || DEFAULTS.pgPassword,
+    embeddingProvider:
+      process.env.EMBEDDING_PROVIDER || DEFAULTS.embeddingProvider,
+    embeddingModel: process.env.EMBEDDING_MODEL || DEFAULTS.embeddingModel,
+    embeddingDimensions: parseInt(
+      process.env.EMBEDDING_DIMENSIONS || String(DEFAULTS.embeddingDimensions),
+      10,
+    ),
+    embeddingBatchSize: parseInt(
+      process.env.EMBEDDING_BATCH_SIZE || String(DEFAULTS.embeddingBatchSize),
+      10,
+    ),
+    logLevel: process.env.LOG_LEVEL || DEFAULTS.logLevel,
+    platform: process.env.PLATFORM || "opencode",
+    omoEnabled: process.env.OMO_ENABLED === "true",
+  };
+}
 
-/**
- * 获取缓存的配置。首次调用后缓存，后续返回单例。
- */
-export function getConfig(): Settings {
+export function getConfig(): PgMemoryConfig {
   if (!_config) {
-    _config = getSettings();
-    ensureAllDirs();
+    _config = loadFromEnv();
   }
   return _config;
 }
 
-/**
- * 构建运行时配置（等价于 getConfig，向后兼容）
- */
-export function buildConfig(): Settings {
+export function buildConfig(): PgMemoryConfig {
   return getConfig();
 }
 
-/**
- * 清除配置缓存，下次 getConfig/buildConfig 会重新加载。
- */
 export function reloadConfig(): void {
-  // Clear BOTH caches. Next getConfig() call re-reads everything fresh.
   _config = null;
-  clearSettingsCache();
 }
 
-/**
- * 检查数据库是否已配置（有密码或 .env 文件存在）
- */
-export function isConfigured(): boolean {
-  return !!(getConfig().pgPassword || loadDotEnv().PG_PASSWORD);
-}
-
-/**
- * 构建数据库配置对象（用于 Pool 初始化）
- */
 export function getDatabaseConfig() {
   const cfg = getConfig();
   return {
@@ -108,13 +83,10 @@ export function getDatabaseConfig() {
     port: cfg.pgPort,
     database: cfg.pgDatabase,
     user: cfg.pgUser,
-    password: cfg.pgPassword || loadDotEnv().PG_PASSWORD || "",
+    password: cfg.pgPassword,
   };
 }
 
-/**
- * 获取嵌入配置
- */
 export function getEmbeddingConfig() {
   const cfg = getConfig();
   return {
@@ -122,7 +94,23 @@ export function getEmbeddingConfig() {
     model: cfg.embeddingModel,
     dimensions: cfg.embeddingDimensions,
     batchSize: cfg.embeddingBatchSize,
-    apiKey: resolveEmbeddingApiKey(cfg.embeddingProvider),
-    baseURL: resolveConfig("DEEPSEEK_BASE_URL"),
   };
 }
+
+/**
+ * Resolve embedding API key for a given provider.
+ * Checks process.env.{PROVIDER}_API_KEY and common env var names.
+ */
+export function resolveEmbeddingApiKey(provider: string): string | undefined {
+  const key = `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+  return process.env[key] || process.env.EMBEDDING_API_KEY || undefined;
+}
+
+/**
+ * Resolve a config value from environment variable.
+ */
+export function resolveConfig(varName: string): string | undefined {
+  return process.env[varName] || undefined;
+}
+
+export type { PgMemoryConfig };
