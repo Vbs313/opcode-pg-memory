@@ -1,6 +1,6 @@
 # 架构决策记录
 
-> 最后更新: 2026-05-10 | 对应版本: opcode-pg-memory v3.5
+> 最后更新: 2026-05-10 | 对应版本: opcode-pg-memory v3.9
 
 ---
 
@@ -88,6 +88,26 @@ TypeScript 从 `"strict": false` + 6 个独立 false flag 改为 `"strict": true
 ### ADR-011: 用户消息捕获 + 噪声过滤
 
 **状态**: ✅ 已实施 (v3.5.1~3.5.3)
+
+---
+
+### ADR-012: 移除双重注入 (v3.9.0)
+
+**状态**: ✅ 已实施 (v3.9.0)
+
+`chat.message` 钩子中的记忆注入逻辑被移除。该注入路径是 v2.x 遗留，
+通过 synthetic part 注入实体信息。v3.0 引入 `experimental.chat.system.transform`
+后，每次 LLM 调用前都会通过 system[0] 合并注入记忆，导致两条路径同时工作，
+LLM 收到两份相同的记忆块。
+
+### ADR-013: Entities 加入全局回退 (v3.9.0)
+
+**状态**: ✅ 已实施 (v3.9.0)
+
+`message-updated` 钩子持续从用户消息中提取实体并写入 `entities` 表，
+但注入管道（keywordRecall + semanticRecall）只检索 `observations`，
+`entities` 表的数据从未被检索到。v3.9.0 在全局回退路径中加入
+`entities WHERE weight >= 5` 检索，使结构化知识也能被跨项目召回。
 
 用户消息通过 `message.updated` 钩子捕获入库。经过三层处理：
 1. `isNoise()` 过滤问候语/纯标点/重复字符

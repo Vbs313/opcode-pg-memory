@@ -1,4 +1,4 @@
-# opcode-pg-memory v3.5
+# opcode-pg-memory v3.9
 
 **OpenCode 长期记忆插件** — PostgreSQL + pgvector 跨平台记忆持久化
 

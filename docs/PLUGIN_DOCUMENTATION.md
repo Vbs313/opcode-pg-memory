@@ -1,4 +1,4 @@
-# opcode-pg-memory 插件架构详解 (v3.5)
+# opcode-pg-memory 插件架构详解 (v3.9)
 
 > PostgreSQL + pgvector 跨平台记忆系统 — 2026-05
 
