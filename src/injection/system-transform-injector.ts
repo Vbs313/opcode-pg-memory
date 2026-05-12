@@ -705,6 +705,46 @@ export async function retrieveMemoriesForInjection(
   // ── Dedup by content prefix ──
   sorted = dedup(sorted, cfg.dedupPrefixLength);
 
+  // ── Global fallback: 新项目跨会话记忆 ──
+  // 如果项目级召回结果太少（<3条），降级到全局检索（不按项目过滤）
+  if (input.project && sorted.length < 3) {
+    logger.debug("Project recall too sparse — trying global fallback");
+    const globalKW = await keywordRecall(pool, undefined, cfg.keywordLimit);
+    const globalPaths: MemoryResult[] = [];
+    if (hasUserContent(input.systemPrompt)) {
+      const emb = await generateQueryEmbedding(input.systemPrompt);
+      if (emb) {
+        const sem = await semanticRecall(
+          pool,
+          emb,
+          undefined,
+          cfg.semanticLimit,
+        );
+        globalPaths.push(...sem);
+      }
+    }
+
+    // 合并全局结果（排除已经在 sorted 里的）
+    const existingIds = new Set(sorted.map((m) => m.id));
+    for (const r of [...globalKW, ...globalPaths]) {
+      if (existingIds.has(r.id)) continue;
+      const key = dedupKey(r.content, cfg.dedupPrefixLength);
+      const rec = computeRecencyBoost(r.createdAt, cfg.recencyHalfLifeDays);
+      const s = hybridScore(null, r.importance, rec, cfg.weights);
+      merged.set(key, { ...r, score: s });
+      existingIds.add(r.id);
+    }
+
+    // 重新排序
+    sorted = Array.from(merged.values())
+      .filter((r) => r.score >= cfg.minScore)
+      .sort((a, b) => b.score - a.score);
+    sorted = dedup(sorted, cfg.dedupPrefixLength);
+    logger.info(
+      `Global fallback added ${sorted.length} cross-project memories`,
+    );
+  }
+
   // ── Trim to token budget ──
   sorted = trimToTokenBudget(sorted, cfg.maxTokens);
 
