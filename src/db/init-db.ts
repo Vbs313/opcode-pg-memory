@@ -599,25 +599,32 @@ export class DatabaseInitializer {
         return;
       }
 
-      await client.query(`
-        ALTER TABLE observations
-        ADD COLUMN IF NOT EXISTS source VARCHAR(512),
-        ADD COLUMN IF NOT EXISTS source_hash VARCHAR(64),
-        ADD COLUMN IF NOT EXISTS platform_source VARCHAR(50) DEFAULT 'opencode',
-        ADD COLUMN IF NOT EXISTS agent_id VARCHAR(100),
-        ADD COLUMN IF NOT EXISTS causal_chain_id UUID,
-        ADD COLUMN IF NOT EXISTS causal_role VARCHAR(10)
-      `);
-
-      // 索引在 createIndexes 中已创建，无需重复
-      this.logger.info(
-        "observations columns migrated (source, platform_source, agent_id)",
-      );
+      // 使用 SAVEPOINT 隔离迁移错误，避免污染外层事务
+      await client.query("SAVEPOINT migrate_obs");
+      try {
+        await client.query(`
+          ALTER TABLE observations
+          ADD COLUMN IF NOT EXISTS source VARCHAR(512),
+          ADD COLUMN IF NOT EXISTS source_hash VARCHAR(64),
+          ADD COLUMN IF NOT EXISTS platform_source VARCHAR(50) DEFAULT 'opencode',
+          ADD COLUMN IF NOT EXISTS agent_id VARCHAR(100),
+          ADD COLUMN IF NOT EXISTS causal_chain_id UUID,
+          ADD COLUMN IF NOT EXISTS causal_role VARCHAR(10)
+        `);
+        await client.query("RELEASE SAVEPOINT migrate_obs");
+        this.logger.info(
+          "observations columns migrated (source, platform_source, agent_id)",
+        );
+      } catch (error) {
+        // 回滚到 savepoint，不清除整个事务
+        await client.query("ROLLBACK TO SAVEPOINT migrate_obs");
+        this.logger.warn(
+          "Observations source migration warning (non-fatal):",
+          error,
+        );
+      }
     } catch (error) {
-      this.logger.warn(
-        "Observations source migration warning (non-fatal):",
-        error,
-      );
+      this.logger.warn("Observations table check failed (non-fatal):", error);
     }
   }
 
