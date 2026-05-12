@@ -476,7 +476,13 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
       try {
         // ── Output compression: reduce token consumption ──
         if (output.output) {
-          const compressed = compressOutput(output.output);
+          const filePath =
+            input.args?.filePath || input.args?.path || undefined;
+          const compressed = compressOutput(output.output, {
+            toolName: input.tool,
+            sessionId: input.sessionID,
+            filePath,
+          });
           if (compressed) {
             output.output = compressed.compressed;
           }
