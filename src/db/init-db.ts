@@ -253,15 +253,7 @@ export class DatabaseInitializer {
         causal_role VARCHAR(10) CHECK (causal_role IN ('cause', 'fix'))
       );
     `);
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_observations_platform_source
-        ON observations(platform_source);
-    `);
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_observations_causal_chain
-        ON observations(causal_chain_id);
-    `);
-    // platform_source 索引在 createIndexes 中创建（必须在列迁移之后）
+    // causal_chain_id 索引在 createIndexes 中创建（必须在列迁移之后）
 
     // ── reflections 表 ──
     await client.query(`
