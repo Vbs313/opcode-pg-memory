@@ -337,7 +337,8 @@ async function resolveScope(
   const hasSessionMap = await tableExists(pool, "session_map");
   const hasTopicSegments = await tableExists(pool, "topic_segments");
 
-  scope.usesNewSchema = hasSessionMap && hasTopicSegments;
+  // session_map 存在即启用新 schema（topic_segments 可选）
+  scope.usesNewSchema = hasSessionMap;
 
   // ── Path A: omo_task_id → find all session_map entries ──────────
   if (input.omo_task_id && scope.usesNewSchema) {
