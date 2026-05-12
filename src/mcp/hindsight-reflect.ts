@@ -86,7 +86,7 @@ Respond with a JSON object containing:
   "summary": "High-level summary of the session insights (2-3 sentences)",
   "patterns": [
     {
-      "pattern_type": "error_pattern|success_pattern|preference|technical_stack|workflow|tool_preference|insight",
+      "pattern_type": "error_pattern|success_pattern|preference|technical_stack|workflow|tool_preference|insight|session_overview",
       "description": "Detailed description of the pattern (1-2 sentences)",
       "confidence": 0.0-1.0,
       "source_observation_ids": ["id1", "id2"],
