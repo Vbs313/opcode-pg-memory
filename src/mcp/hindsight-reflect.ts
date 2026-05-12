@@ -1,8 +1,8 @@
-import { Pool } from 'pg';
-import { createLogger } from '../services/logger';
-import type { Reflection } from '../types';
+import { Pool } from "pg";
+import { createLogger } from "../services/logger";
+import type { Reflection } from "../types";
 
-const logger = createLogger('hindsight-reflect');
+const logger = createLogger("hindsight-reflect");
 
 // ============================================================
 // Public input / output interfaces
@@ -12,8 +12,8 @@ export interface HindsightReflectInput {
   session_id?: string;
   omo_task_id?: string;
   topic_segment_id?: string;
-  trigger_type?: 'manual' | 'threshold' | 'scheduled';
-  model_size?: '7b' | '14b' | 'full';
+  trigger_type?: "manual" | "threshold" | "scheduled";
+  model_size?: "7b" | "14b" | "full";
   aggregate?: boolean;
   /** @deprecated Backward compat — threshold is now in HindsightReflectConfig */
   observation_threshold?: number;
@@ -38,7 +38,7 @@ export interface HindsightReflectConfig {
   segmentThreshold: number;
   minThreshold: number;
   maxThreshold: number;
-  modelSize: '7b' | '14b' | 'full';
+  modelSize: "7b" | "14b" | "full";
   offPeakHours: number[];
   minConfidence: number;
   /** Max observations to fetch per segment */
@@ -146,7 +146,7 @@ const DEFAULT_CONFIG: HindsightReflectConfig = {
   segmentThreshold: 10,
   minThreshold: 30,
   maxThreshold: 50,
-  modelSize: '7b',
+  modelSize: "7b",
   offPeakHours: [1, 2, 3, 4, 5],
   minConfidence: 0.6,
   maxObservationsPerSegment: 100,
@@ -186,10 +186,10 @@ export async function hindsightReflect(
   let totalTokens = { input: 0, output: 0, total: 0 };
 
   logger.info(
-    `hindsight_reflect called: session=${input.session_id || 'none'}, ` +
-    `omo_task=${input.omo_task_id || 'none'}, ` +
-    `topic_segment=${input.topic_segment_id || 'none'}, ` +
-    `aggregate=${input.aggregate ?? false}`,
+    `hindsight_reflect called: session=${input.session_id || "none"}, ` +
+      `omo_task=${input.omo_task_id || "none"}, ` +
+      `topic_segment=${input.topic_segment_id || "none"}, ` +
+      `aggregate=${input.aggregate ?? false}`,
   );
 
   try {
@@ -197,7 +197,7 @@ export async function hindsightReflect(
     const scope = await resolveScope(input, pool);
 
     if (!scope.observable) {
-      logger.info('hindsight_reflect: no observations available for scope');
+      logger.info("hindsight_reflect: no observations available for scope");
       return {
         generated_reflections: [],
         token_usage: totalTokens,
@@ -206,10 +206,15 @@ export async function hindsightReflect(
     }
 
     // ── Step 2: Collect observations ──────────────────────────────────
-    const observations = await collectObservations(input, scope, mergedConfig, pool);
+    const observations = await collectObservations(
+      input,
+      scope,
+      mergedConfig,
+      pool,
+    );
 
     if (observations.length === 0) {
-      logger.info('hindsight_reflect: zero observations collected');
+      logger.info("hindsight_reflect: zero observations collected");
       return {
         generated_reflections: [],
         token_usage: totalTokens,
@@ -221,10 +226,10 @@ export async function hindsightReflect(
 
     // ── Threshold check (skip if below threshold and not manual) ──────
     const threshold = mergedConfig.observationThreshold;
-    if (observations.length < threshold && input.trigger_type !== 'manual') {
+    if (observations.length < threshold && input.trigger_type !== "manual") {
       logger.info(
         `hindsight_reflect: observation count (${observations.length}) ` +
-        `below threshold (${threshold}), skipping`,
+          `below threshold (${threshold}), skipping`,
       );
       return {
         generated_reflections: [],
@@ -242,7 +247,7 @@ export async function hindsightReflect(
 
     logger.info(
       `Grouped into ${segments.length} segment(s) ` +
-      `(aggregate=${shouldAggregate})`,
+        `(aggregate=${shouldAggregate})`,
     );
 
     // ── Step 4: Reflect on each segment group ─────────────────────────
@@ -270,7 +275,7 @@ export async function hindsightReflect(
     const elapsed = Date.now() - startTime;
     logger.info(
       `hindsight_reflect completed: ` +
-      `${generatedReflections.length} reflections in ${elapsed}ms`,
+        `${generatedReflections.length} reflections in ${elapsed}ms`,
     );
 
     return {
@@ -280,7 +285,7 @@ export async function hindsightReflect(
     };
   } catch (error) {
     const elapsed = Date.now() - startTime;
-    logger.error('hindsight_reflect error:', error);
+    logger.error("hindsight_reflect error:", error);
 
     // Record error in reflection_errors table
     await logReflectionError(input, error, pool);
@@ -329,8 +334,8 @@ async function resolveScope(
   };
 
   // Check if session_map table exists (new schema detection)
-  const hasSessionMap = await tableExists(pool, 'session_map');
-  const hasTopicSegments = await tableExists(pool, 'topic_segments');
+  const hasSessionMap = await tableExists(pool, "session_map");
+  const hasTopicSegments = await tableExists(pool, "topic_segments");
 
   scope.usesNewSchema = hasSessionMap && hasTopicSegments;
 
@@ -342,7 +347,9 @@ async function resolveScope(
     );
     if (smResult.rows.length > 0) {
       scope.sessionMapIds = smResult.rows.map((r: any) => r.id);
-      scope.opencodeSessionIds = smResult.rows.map((r: any) => r.opencode_session_id);
+      scope.opencodeSessionIds = smResult.rows.map(
+        (r: any) => r.opencode_session_id,
+      );
       scope.observable = true;
     }
     return scope;
@@ -427,27 +434,42 @@ async function collectObservations(
   // ── Path A: Single topic_segment ────────────────────────────────
   if (scope.topicSegmentId && scope.usesNewSchema) {
     try {
-      return await collectObservationsForSegment(scope.topicSegmentId, config, pool);
+      return await collectObservationsForSegment(
+        scope.topicSegmentId,
+        config,
+        pool,
+      );
     } catch (err) {
-      logger.warn('New-schema segment collection failed, falling back:', err);
+      logger.warn("New-schema segment collection failed, falling back:", err);
     }
   }
 
   // ── Path B: omo_task_id across multiple session_maps ────────────
-  if (scope.omoTaskId && scope.usesNewSchema && scope.sessionMapIds.length > 0) {
+  if (
+    scope.omoTaskId &&
+    scope.usesNewSchema &&
+    scope.sessionMapIds.length > 0
+  ) {
     try {
       return await collectObservationsForOmoTask(scope.omoTaskId, config, pool);
     } catch (err) {
-      logger.warn('New-schema omo_task collection failed, falling back:', err);
+      logger.warn("New-schema omo_task collection failed, falling back:", err);
     }
   }
 
   // ── Path C: session_map(s) with topic_segments ─────────────────
   if (scope.usesNewSchema && scope.sessionMapIds.length > 0) {
     try {
-      return await collectObservationsForSessionMaps(scope.sessionMapIds, config, pool);
+      return await collectObservationsForSessionMaps(
+        scope.sessionMapIds,
+        config,
+        pool,
+      );
     } catch (err) {
-      logger.warn('New-schema session_map collection failed, falling back:', err);
+      logger.warn(
+        "New-schema session_map collection failed, falling back:",
+        err,
+      );
     }
   }
 
@@ -541,9 +563,9 @@ async function collectObservationsLegacy(
 
   return result.rows.map((row: any) => ({
     id: row.id,
-    tool_name: row.tool_name || '',
-    tool_input_summary: row.tool_input_summary || '',
-    tool_output_summary: row.tool_output_summary || '',
+    tool_name: row.tool_name || "",
+    tool_input_summary: row.tool_input_summary || "",
+    tool_output_summary: row.tool_output_summary || "",
     importance: row.importance,
     created_at: row.created_at,
     metadata: row.metadata || {},
@@ -553,9 +575,9 @@ async function collectObservationsLegacy(
 function mapEnrichedObservation(row: any): EnrichedObservation {
   return {
     id: row.id,
-    tool_name: row.tool_name || '',
-    tool_input_summary: row.tool_input_summary || '',
-    tool_output_summary: row.tool_output_summary || '',
+    tool_name: row.tool_name || "",
+    tool_input_summary: row.tool_input_summary || "",
+    tool_output_summary: row.tool_output_summary || "",
     importance: row.importance ?? 3,
     created_at: row.created_at,
     metadata: row.metadata || {},
@@ -591,11 +613,17 @@ function groupObservationsBySegment(
     // Single aggregate group spanning all segments
     return [
       {
-        segmentId: '__aggregate__',
+        segmentId: "__aggregate__",
         topicSummary: collectAllTopicSummaries(observations),
         observations,
-        opencodeSessionIds: dedupe(observations.map((o) => o.opencode_session_id).filter(Boolean) as string[]),
-        sessionMapIds: dedupe(observations.map((o) => o.session_map_id).filter(Boolean) as string[]),
+        opencodeSessionIds: dedupe(
+          observations
+            .map((o) => o.opencode_session_id)
+            .filter(Boolean) as string[],
+        ),
+        sessionMapIds: dedupe(
+          observations.map((o) => o.session_map_id).filter(Boolean) as string[],
+        ),
       },
     ];
   }
@@ -603,7 +631,7 @@ function groupObservationsBySegment(
   // Group by segment_id; fallback to a single unnamed group if no segments
   const groups = new Map<string, EnrichedObservation[]>();
   for (const obs of observations) {
-    const key = obs.segment_id || '__no_segment__';
+    const key = obs.segment_id || "__no_segment__";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(obs);
   }
@@ -614,10 +642,16 @@ function groupObservationsBySegment(
       segmentId,
       topicSummary:
         obs[0]?.topic_summary ||
-        (segmentId === '__no_segment__' ? 'Unsegmented observations' : `Segment ${segmentId}`),
+        (segmentId === "__no_segment__"
+          ? "Unsegmented observations"
+          : `Segment ${segmentId}`),
       observations: obs,
-      opencodeSessionIds: dedupe(obs.map((o) => o.opencode_session_id).filter(Boolean) as string[]),
-      sessionMapIds: dedupe(obs.map((o) => o.session_map_id).filter(Boolean) as string[]),
+      opencodeSessionIds: dedupe(
+        obs.map((o) => o.opencode_session_id).filter(Boolean) as string[],
+      ),
+      sessionMapIds: dedupe(
+        obs.map((o) => o.session_map_id).filter(Boolean) as string[],
+      ),
     });
   }
 
@@ -628,7 +662,7 @@ function collectAllTopicSummaries(observations: EnrichedObservation[]): string {
   const summaries = dedupe(
     observations.map((o) => o.topic_summary).filter(Boolean) as string[],
   );
-  return summaries.length > 0 ? summaries.join('; ') : 'Cross-topic aggregate';
+  return summaries.length > 0 ? summaries.join("; ") : "Cross-topic aggregate";
 }
 
 // ============================================================
@@ -698,7 +732,7 @@ function buildReflectionPrompt(
   config: HindsightReflectConfig,
   _input: HindsightReflectInput,
 ): string {
-  const isAggregate = segment.segmentId === '__aggregate__';
+  const isAggregate = segment.segmentId === "__aggregate__";
   const template = isAggregate
     ? config.prompts.aggregateUserPrompt
     : config.prompts.perSegmentUserPrompt;
@@ -716,14 +750,14 @@ function buildReflectionPrompt(
 
   const sessionContext =
     segment.opencodeSessionIds.length > 0
-      ? segment.opencodeSessionIds.join(', ')
-      : 'unknown';
+      ? segment.opencodeSessionIds.join(", ")
+      : "unknown";
 
   return template
-    .replace('{topic_summary}', segment.topicSummary)
-    .replace('{session_context}', sessionContext)
-    .replace('{topics_summary}', segment.topicSummary)
-    .replace('{observations_json}', observationsJson);
+    .replace("{topic_summary}", segment.topicSummary)
+    .replace("{session_context}", sessionContext)
+    .replace("{topics_summary}", segment.topicSummary)
+    .replace("{observations_json}", observationsJson);
 }
 
 // ============================================================
@@ -755,7 +789,7 @@ async function performReflectionWithLLM(
 ): Promise<LLMReflectionResult> {
   logger.info(
     `Performing reflection with ${config.modelSize} model ` +
-    `on ${observations.length} observations (topic: ${topicSummary})`,
+      `on ${observations.length} observations (topic: ${topicSummary})`,
   );
 
   // In production, this would call an LLM API (OpenAI, DeepSeek, etc.)
@@ -787,35 +821,48 @@ function performHeuristicReflection(
   observations: EnrichedObservation[],
   topicSummary: string,
 ): LLMReflectionResult {
-  const patterns: LLMReflectionResult['patterns'] = [];
+  const patterns: LLMReflectionResult["patterns"] = [];
   const recommendations: string[] = [];
 
-  // 1. Error pattern detection
+  // 1. Session overview (always generated)
+  const toolCount = observations.filter((o) => o.tool_name).length;
+  const userMsgCount = observations.filter(
+    (o) => o.tool_name === "user_message",
+  ).length;
+  patterns.push({
+    pattern_type: "session_overview",
+    description: `[${topicSummary}] Session had ${observations.length} observations (${toolCount} tool calls, ${userMsgCount} user messages).`,
+    confidence: 0.9,
+    source_observation_ids: observations.slice(0, 3).map((o) => o.id),
+    applicability: "Session context understanding",
+  });
+
+  // 2. Error pattern detection
   const errorObs = observations.filter(
     (obs) =>
-      obs.importance >= 4 ||
-      obs.tool_output_summary?.toLowerCase().includes('error') ||
-      obs.tool_output_summary?.toLowerCase().includes('exception') ||
-      obs.tool_output_summary?.toLowerCase().includes('failed'),
+      obs.importance >= 3 ||
+      obs.tool_output_summary?.toLowerCase().includes("error") ||
+      obs.tool_output_summary?.toLowerCase().includes("exception") ||
+      obs.tool_output_summary?.toLowerCase().includes("failed"),
   );
 
-  if (errorObs.length >= 2) {
+  if (errorObs.length >= 1) {
     patterns.push({
-      pattern_type: 'error_pattern',
+      pattern_type: "error_pattern",
       description: `[${topicSummary}] Encountered ${errorObs.length} error situations. Review error handling patterns.`,
       confidence: 0.75,
       source_observation_ids: errorObs.map((o) => o.id).slice(0, 5),
-      applicability: 'Future error-prone operations',
+      applicability: "Future error-prone operations",
     });
     recommendations.push(
       `[${topicSummary}] Consider adding more robust error handling and validation.`,
     );
   }
 
-  // 2. Tool preference detection (>= 5 uses)
+  // 3. Tool preference detection (>= 3 uses)
   const toolUsage: Record<string, { count: number; ids: string[] }> = {};
   for (const obs of observations) {
-    if (obs.tool_name) {
+    if (obs.tool_name && obs.tool_name !== "user_message") {
       if (!toolUsage[obs.tool_name]) {
         toolUsage[obs.tool_name] = { count: 0, ids: [] };
       }
@@ -824,51 +871,36 @@ function performHeuristicReflection(
     }
   }
 
-  const frequentTools = Object.entries(toolUsage)
-    .filter(([, data]) => data.count >= 5)
-    .sort((a, b) => b[1].count - a[1].count);
-
-  for (const [toolName, data] of frequentTools) {
-    patterns.push({
-      pattern_type: 'tool_preference',
-      description: `[${topicSummary}] Frequent use of ${toolName} (${data.count} times) indicates this is a preferred tool.`,
-      confidence: Math.min(0.6 + data.count * 0.02, 0.95),
-      source_observation_ids: data.ids.slice(0, 5),
-      applicability: 'Similar development tasks',
-    });
-  }
-
-  // Also detect general workflow pattern from top tool
-  const topTools = Object.entries(toolUsage)
+  const sortedTools = Object.entries(toolUsage)
     .filter(([, data]) => data.count >= 3)
     .sort((a, b) => b[1].count - a[1].count);
 
-  if (topTools.length > 0 && frequentTools.length === 0) {
-    const topTool = topTools[0];
+  for (const [toolName, data] of sortedTools) {
+    const pct = Math.round((data.count / observations.length) * 100);
     patterns.push({
-      pattern_type: 'workflow',
-      description: `[${topicSummary}] Frequent use of ${topTool[0]} (${topTool[1].count} times) indicates this is a core workflow tool.`,
-      confidence: 0.7,
-      source_observation_ids: topTool[1].ids.slice(0, 5),
-      applicability: 'Similar development tasks',
+      pattern_type: data.count >= 5 ? "tool_preference" : "workflow",
+      description: `[${topicSummary}] ${toolName} used ${data.count} times (${pct}% of session).`,
+      confidence: Math.min(0.5 + data.count * 0.05, 0.95),
+      source_observation_ids: data.ids.slice(0, 5),
+      applicability: "Similar development tasks",
     });
   }
 
-  // 3. Success pattern detection
+  // 4. Success pattern detection
   const successObs = observations.filter(
     (obs) =>
-      obs.tool_output_summary?.toLowerCase().includes('success') ||
-      obs.tool_output_summary?.toLowerCase().includes('completed') ||
-      obs.tool_output_summary?.toLowerCase().includes('done'),
+      obs.tool_output_summary?.toLowerCase().includes("success") ||
+      obs.tool_output_summary?.toLowerCase().includes("completed") ||
+      obs.tool_output_summary?.toLowerCase().includes("done"),
   );
 
   if (successObs.length >= 3) {
     patterns.push({
-      pattern_type: 'success_pattern',
+      pattern_type: "success_pattern",
       description: `[${topicSummary}] Session showed consistent successful execution patterns (${successObs.length} successes).`,
       confidence: 0.7,
       source_observation_ids: successObs.map((o) => o.id).slice(0, 5),
-      applicability: 'Similar task types',
+      applicability: "Similar task types",
     });
   }
 
@@ -876,16 +908,20 @@ function performHeuristicReflection(
   const techStack = detectTechnicalStack(observations);
   if (techStack.languages.length > 0 || techStack.frameworks.length > 0) {
     patterns.push({
-      pattern_type: 'technical_stack',
-      description: `[${topicSummary}] Primary technologies: ${[...techStack.languages, ...techStack.frameworks].join(', ')}`,
+      pattern_type: "technical_stack",
+      description: `[${topicSummary}] Primary technologies: ${[...techStack.languages, ...techStack.frameworks].join(", ")}`,
       confidence: 0.85,
       source_observation_ids: observations.slice(0, 5).map((o) => o.id),
-      applicability: 'Project-wide development',
+      applicability: "Project-wide development",
     });
   }
 
   // Generate summary
-  const summary = generateReflectionSummary(topicSummary, patterns, observations.length);
+  const summary = generateReflectionSummary(
+    topicSummary,
+    patterns,
+    observations.length,
+  );
 
   return {
     summary,
@@ -914,7 +950,7 @@ async function storeReflection(
   input: HindsightReflectInput,
 ): Promise<Reflection | null> {
   try {
-    const isAggregate = segment.segmentId === '__aggregate__';
+    const isAggregate = segment.segmentId === "__aggregate__";
     const topicSegmentId = isAggregate ? null : segment.segmentId || null;
 
     const metadata = {
@@ -922,7 +958,7 @@ async function storeReflection(
       generatedAt: new Date().toISOString(),
       modelSize: config.modelSize,
       observationCount: segment.observations.length,
-      triggerType: input.trigger_type || 'threshold',
+      triggerType: input.trigger_type || "threshold",
       topicSummary: segment.topicSummary,
       isAggregate,
     };
@@ -952,7 +988,7 @@ async function storeReflection(
         );
       } catch {
         // New columns may not exist yet — fall through to legacy INSERT
-        logger.warn('New schema INSERT failed, falling back to legacy');
+        logger.warn("New schema INSERT failed, falling back to legacy");
       }
     }
 
@@ -976,13 +1012,14 @@ async function storeReflection(
     }
 
     if (!insertResult) {
-      logger.warn('No valid session reference to store reflection');
+      logger.warn("No valid session reference to store reflection");
       return null;
     }
 
     return {
       id: insertResult.rows[0].id,
-      session_id: scope.opencodeSessionIds[0] || scope.sessionInternalIds[0] || '',
+      session_id:
+        scope.opencodeSessionIds[0] || scope.sessionInternalIds[0] || "",
       topic_segment_id: topicSegmentId || undefined,
       summary: pattern.description,
       source_observation_ids: pattern.source_observation_ids,
@@ -992,7 +1029,7 @@ async function storeReflection(
       metadata,
     };
   } catch (error) {
-    logger.error('Failed to store reflection:', error);
+    logger.error("Failed to store reflection:", error);
     return null;
   }
 }
@@ -1043,7 +1080,7 @@ async function updateReflectionTimestamp(
       );
     }
   } catch (error) {
-    logger.warn('Failed to update reflection timestamp:', error);
+    logger.warn("Failed to update reflection timestamp:", error);
   }
 }
 
@@ -1057,8 +1094,9 @@ async function logReflectionError(
   pool: Pool,
 ): Promise<void> {
   try {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    const errorStack = error instanceof Error ? error.stack : '';
+    const errorMessage =
+      error instanceof Error ? error.message : "Unknown error";
+    const errorStack = error instanceof Error ? error.stack : "";
 
     // Try to resolve session_id for the error record
     let sessionId: string | null = null;
@@ -1080,7 +1118,7 @@ async function logReflectionError(
       [sessionId, errorMessage, errorStack, 0, 0],
     );
   } catch (logError) {
-    logger.error('Failed to log reflection error:', logError);
+    logger.error("Failed to log reflection error:", logError);
   }
 }
 
@@ -1122,19 +1160,21 @@ function detectTechnicalStack(
   const allText = [
     ...observations.map((o) => o.tool_output_summary),
     ...observations.map((o) => o.tool_name),
-  ].join(' ').toLowerCase();
+  ]
+    .join(" ")
+    .toLowerCase();
 
   const languages: string[] = [];
   const frameworks: string[] = [];
   const tools: string[] = [];
 
   const langPatterns = [
-    { name: 'TypeScript', pattern: /typescript|\.ts\b/ },
-    { name: 'JavaScript', pattern: /javascript|\.js\b/ },
-    { name: 'Python', pattern: /python|\.py\b/ },
-    { name: 'Rust', pattern: /rust|\.rs\b/ },
-    { name: 'Go', pattern: /\bgo\b|golang|\.go\b/ },
-    { name: 'Java', pattern: /\bjava\b|\.java\b/ },
+    { name: "TypeScript", pattern: /typescript|\.ts\b/ },
+    { name: "JavaScript", pattern: /javascript|\.js\b/ },
+    { name: "Python", pattern: /python|\.py\b/ },
+    { name: "Rust", pattern: /rust|\.rs\b/ },
+    { name: "Go", pattern: /\bgo\b|golang|\.go\b/ },
+    { name: "Java", pattern: /\bjava\b|\.java\b/ },
   ];
 
   for (const { name, pattern } of langPatterns) {
@@ -1142,12 +1182,12 @@ function detectTechnicalStack(
   }
 
   const frameworkPatterns = [
-    { name: 'React', pattern: /react/ },
-    { name: 'Vue', pattern: /vue/ },
-    { name: 'Angular', pattern: /angular/ },
-    { name: 'Express', pattern: /express/ },
-    { name: 'FastAPI', pattern: /fastapi/ },
-    { name: 'Django', pattern: /django/ },
+    { name: "React", pattern: /react/ },
+    { name: "Vue", pattern: /vue/ },
+    { name: "Angular", pattern: /angular/ },
+    { name: "Express", pattern: /express/ },
+    { name: "FastAPI", pattern: /fastapi/ },
+    { name: "Django", pattern: /django/ },
   ];
 
   for (const { name, pattern } of frameworkPatterns) {
@@ -1155,12 +1195,12 @@ function detectTechnicalStack(
   }
 
   const toolPatterns = [
-    { name: 'Git', pattern: /git\b/ },
-    { name: 'Docker', pattern: /docker/ },
-    { name: 'npm', pattern: /\bnpm\b/ },
-    { name: 'yarn', pattern: /\byarn\b/ },
-    { name: 'webpack', pattern: /webpack/ },
-    { name: 'vite', pattern: /\bvite\b/ },
+    { name: "Git", pattern: /git\b/ },
+    { name: "Docker", pattern: /docker/ },
+    { name: "npm", pattern: /\bnpm\b/ },
+    { name: "yarn", pattern: /\byarn\b/ },
+    { name: "webpack", pattern: /webpack/ },
+    { name: "vite", pattern: /\bvite\b/ },
   ];
 
   for (const { name, pattern } of toolPatterns) {
@@ -1182,7 +1222,7 @@ function generateReflectionSummary(
     return `[${topicSummary}] Analyzed ${observationCount} observations. No significant patterns detected.`;
   }
 
-  const patternTypes = patterns.map((p) => p.pattern_type).join(', ');
+  const patternTypes = patterns.map((p) => p.pattern_type).join(", ");
 
   return `[${topicSummary}] Analyzed ${observationCount} observations and identified ${patterns.length} patterns: ${patternTypes}. Key insights available for future sessions.`;
 }
@@ -1209,7 +1249,7 @@ export async function getReflectionStats(
   lastReflectionAt: Date | null;
 }> {
   const sessionResult = await pool.query(
-    'SELECT id, reflection_last_at FROM sessions WHERE external_id = $1',
+    "SELECT id, reflection_last_at FROM sessions WHERE external_id = $1",
     [sessionId],
   );
 
@@ -1225,7 +1265,10 @@ export async function getReflectionStats(
   const internalId = sessionResult.rows[0].id;
 
   const [countResult, patternResult, confidenceResult] = await Promise.all([
-    pool.query('SELECT COUNT(*) as count FROM reflections WHERE session_id = $1', [internalId]),
+    pool.query(
+      "SELECT COUNT(*) as count FROM reflections WHERE session_id = $1",
+      [internalId],
+    ),
     pool.query(
       `SELECT pattern_type, COUNT(*) as count
        FROM reflections
@@ -1233,7 +1276,10 @@ export async function getReflectionStats(
        GROUP BY pattern_type`,
       [internalId],
     ),
-    pool.query('SELECT AVG(confidence) as avg FROM reflections WHERE session_id = $1', [internalId]),
+    pool.query(
+      "SELECT AVG(confidence) as avg FROM reflections WHERE session_id = $1",
+      [internalId],
+    ),
   ]);
 
   const patternTypes: Record<string, number> = {};
