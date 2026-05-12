@@ -54,6 +54,10 @@ export const SettingsSchema = z.object({
   minInjectionTokens: z.coerce.number().int().positive().default(500),
   maxInjectionTokens: z.coerce.number().int().positive().default(3000),
 
+  // ── Output compression (对标 rtk 思路，Plugin 层实现) ──
+  maxOutputLength: z.coerce.number().int().positive().default(10000),
+  maxOutputLines: z.coerce.number().int().positive().default(200),
+
   // ── OmO multi-agent integration ──
   omoEnabled: z.coerce.boolean().default(false),
 

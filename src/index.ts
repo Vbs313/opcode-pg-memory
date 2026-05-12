@@ -42,6 +42,7 @@ import { buildInjectionBlock } from "./injection/system-transform-injector";
 import { buildAndWriteSessionSummary } from "./injection/session-summary-writer";
 import { setPool } from "./services/memory-buffer";
 import { clearSession } from "./services/short-term-memory";
+import { compressOutput } from "./services/output-compressor";
 
 // ============================================================================
 // Plugin Type Definitions (matches official OpenCode Plugin API)
@@ -473,6 +474,14 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
       output: { title: string; output: string; metadata: any },
     ) => {
       try {
+        // ── Output compression: reduce token consumption ──
+        if (output.output) {
+          const compressed = compressOutput(output.output);
+          if (compressed) {
+            output.output = compressed.compressed;
+          }
+        }
+
         const result = {
           success: !(
             output.output && output.output.toLowerCase().includes("error")
