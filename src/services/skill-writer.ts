@@ -1,19 +1,21 @@
 /**
- * skill-writer.ts — 反思模式 → oh-my-openagent 技能文件
+ * skill-writer.ts — agentskills.io 兼容技能写入器
  *
- * 将 hindsight_reflect 产出的高置信度 pattern 自动写入
- * ~/.config/opencode/skills/ 目录，使 oh-my-openagent 的 skill-loader
- * 自动加载为 Agent 可用技能。
+ * 将 hindsight_reflect 产出的高置信度 pattern 自动生成
+ * agentskills.io 标准技能文件：
+ *   ~/.config/opencode/skills/<name>/
+ *   └── SKILL.md   (YAML frontmatter + Markdown)
  *
- * 流程：
- *   hindsight_reflect → confidence >= 0.8 + action_plan
- *     → writeSkillFromReflection()
- *       → formatSkillContent() → 原子写入 skills/<name>.md
+ * 命名规范：
+ *   - 小写字母 + 数字 + 连字符
+ *   - 1-64 字符
+ *   - 不得以连字符开头或结尾
+ *   - 不得有连续连字符
  */
 
 import { writeFile, rename, mkdir } from "fs/promises";
 import { existsSync } from "fs";
-import { join, dirname } from "path";
+import { join } from "path";
 import { homedir } from "os";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
@@ -23,7 +25,6 @@ const logger = createLogger("skill-writer");
 
 // ── 路径 ────────────────────────────────────────────────
 
-/** skills 目录路径：~/.config/opencode/skills/ */
 function getSkillsDir(): string {
   const configDir = process.env.XDG_CONFIG_HOME
     ? join(process.env.XDG_CONFIG_HOME, "opencode")
@@ -31,7 +32,24 @@ function getSkillsDir(): string {
   return join(configDir, "skills");
 }
 
-// ── 技能内容生成 ──────────────────────────────────────
+// ── 命名工具 ──────────────────────────────────────────
+
+/**
+ * 将任意字符串转换为 agentskills.io 有效 name：
+ * 小写 + 连字符，移除非法字符，截断 64 字符。
+ */
+function toValidSkillName(pattern_type: string, id: string): string {
+  const base = `${pattern_type}-${id.substring(0, 8)}`
+    .toLowerCase()
+    .replace(/_/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .substring(0, 64);
+  return base || `skill-${id.substring(0, 8)}`;
+}
+
+// ── 内容生成 ──────────────────────────────────────────
 
 interface PatternInput {
   pattern_type?: string;
@@ -45,10 +63,9 @@ interface PatternInput {
 }
 
 /**
- * 将 pattern 格式化为 oh-my-openagent 技能文件内容。
- * 格式匹配现有 skills/ 目录中的 .md 文件规范。
+ * 生成 agentskills.io 兼容的 SKILL.md 内容。
  */
-function formatSkillContent(pattern: PatternInput): string {
+function formatSkillContent(pattern: PatternInput, skillName: string): string {
   const { trigger, action } = pattern.action_plan;
   const toolName = trigger?.tool || "unknown";
   const markers = trigger?.output_contains?.length
@@ -56,65 +73,53 @@ function formatSkillContent(pattern: PatternInput): string {
     : "特定条件";
   const actionContent = action?.content || pattern.summary;
 
-  const title = `Auto Skill: ${toolName} ${(pattern.pattern_type || "pattern").replace(/_/g, " ")}`;
-  const slug = `pg-memory-auto-${pattern.pattern_type || "unknown"}-${(pattern.id || Date.now().toString(36)).substring(0, 8)}`;
-
-  // 描述行限制 100 字符
-  const desc =
-    pattern.summary.length > 100
-      ? pattern.summary.substring(0, 97) + "..."
-      : pattern.summary;
-
   return `---
-name: ${slug}
-description: 自动从反思中生成: ${desc}
+name: ${skillName}
+description: 自动生成: ${pattern.summary.length > 100 ? pattern.summary.substring(0, 97) + "..." : pattern.summary}
 ---
-
-# ${title}
-
-从 hindsight_reflect 的 ${pattern.pattern_type || "pattern"} 模式自动生成的 Agent 技能。
-置信度: ${Math.round(pattern.confidence * 100)}%
 
 ## Trigger
 
-当 \`${toolName}\`${markers !== "特定条件" ? ` 输出包含以下特征: ${markers}` : ""} 时：
+当 \`${toolName}\`${markers !== "特定条件" ? ` 输出包含: ${markers}` : ""} 时自动采用此策略。
 
-## Action
+## Steps
 
 ${actionContent}
 
-## Source
+---
 
-- 模式类型: ${pattern.pattern_type || "unknown"}
-- 置信度: ${pattern.confidence}
-- 反射 ID: ${pattern.id || "N/A"}
-- 生成时间: ${new Date().toISOString()}
+_agentskills.io 格式 — 由 opcode-pg-memory v3.14+ 自动生成_
+_来源: ${pattern.pattern_type || "pattern"}, 置信度: ${pattern.confidence}_
 `;
 }
 
-// ── 写入技能文件 ──────────────────────────────────────
+// ── 写入 ──────────────────────────────────────────────
 
 /**
- * 将一个 pattern 写入 skills/ 目录作为技能文件。
+ * 将一个 pattern 写入 skills/<name>/SKILL.md。
+ * agentskills.io 兼容格式，目录结构 + YAML frontmatter。
  * 原子写入（tmp → rename），幂等（同名覆盖）。
- * @returns 写入成功时返回技能文件名，否则返回 null
  */
 export async function writeSkillFromReflection(
   pattern: PatternInput,
 ): Promise<string | null> {
   try {
     const skillsDir = getSkillsDir();
-    const slug = `pg-memory-auto-${pattern.pattern_type}-${(pattern.id || Date.now().toString(36)).substring(0, 8)}`;
-    const filePath = join(skillsDir, `${slug}.md`);
+    const skillName = toValidSkillName(
+      pattern.pattern_type || "pattern",
+      pattern.id || Date.now().toString(36),
+    );
+    const skillDir = join(skillsDir, skillName);
+    const filePath = join(skillDir, "SKILL.md");
 
     // 确保目录存在
-    if (!existsSync(skillsDir)) {
-      await mkdir(skillsDir, { recursive: true });
+    if (!existsSync(skillDir)) {
+      await mkdir(skillDir, { recursive: true });
     }
 
-    const content = formatSkillContent(pattern);
+    const content = formatSkillContent(pattern, skillName);
 
-    // 原子写入
+    // 原子写入：tmp → rename
     const tmpPath = join(tmpdir(), `skill-${randomUUID()}.md.tmp`);
     await writeFile(tmpPath, content, "utf-8");
     await rename(tmpPath, filePath);

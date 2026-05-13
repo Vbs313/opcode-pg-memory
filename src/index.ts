@@ -8,7 +8,10 @@ import {
   clearSessionCache,
 } from "./hooks/tool-execute";
 import { handleMessageUpdated } from "./hooks/message-updated";
-import { cleanupExpiredAccumulators } from "./hooks/message-part-updated";
+import {
+  handleMessagePartUpdated,
+  cleanupExpiredAccumulators,
+} from "./hooks/message-part-updated";
 import {
   handleSessionCompacting,
   handleSessionCompacted,
@@ -354,6 +357,25 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
         if (type === "session.deleted") {
           clearSession(sid);
           clearSessionCache(sid);
+        }
+
+        // Route message.part.updated to streaming observation capture
+        if (type === "message.part.updated") {
+          handleMessagePartUpdated(
+            {
+              session: { id: sid },
+              message: {
+                id: properties.messageId || properties.id || "unknown",
+                partIndex: properties.partIndex ?? 0,
+                content: properties.content || "",
+                isComplete: properties.isComplete ?? false,
+              },
+            },
+            {},
+            pool,
+          ).catch((err: Error) =>
+            logger.warn("Failed to handle message.part.updated:", err.message),
+          );
         }
       } catch (error) {
         logger.error(`Error handling event '${type}':`, error);
