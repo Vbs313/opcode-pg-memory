@@ -3,6 +3,7 @@ import { SessionCompletedInput, SessionCompletedOutput } from "../types";
 import { createLogger } from "../services/logger";
 import { hindsightReflect } from "../mcp/hindsight-reflect";
 import { applyReflection } from "../mcp/apply-reflection";
+import { writeSkillFromReflection } from "../services/skill-writer";
 
 const logger = createLogger("session-completed");
 
@@ -278,6 +279,16 @@ async function executeReflection(
           appliedCount++;
           logger.info(`Auto-applied ${ref.id} (${ref.pattern_type})`);
         }
+        // 同时生成 skill 文件（无论 apply 是否成功，独立尝试）
+        writeSkillFromReflection({
+          pattern_type: ref.pattern_type,
+          summary: ref.summary,
+          confidence: ref.confidence,
+          action_plan: (ref as any).action_plan,
+          id: ref.id!.toString(),
+        }).catch((err: Error) =>
+          logger.warn("Skill write failed:", err.message),
+        );
       }
     }
     await pool.query(
