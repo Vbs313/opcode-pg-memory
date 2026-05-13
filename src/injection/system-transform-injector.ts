@@ -240,6 +240,39 @@ async function fetchActiveRules(pool: Pool): Promise<ActiveRule[]> {
 // Formatter
 // ============================================================
 
+/**
+ * 查询项目骨架：weight 最高的 N 个文件实体，用于注入到 Agent 上下文。
+ * 让 Agent 无需探索即可了解项目结构。
+ */
+async function getProjectSkeleton(
+  projectId: string,
+  pool: Pool,
+  limit = 7,
+): Promise<string | null> {
+  try {
+    const { rows } = await pool.query(
+      `SELECT e.name, e.weight, e.last_seen_at
+       FROM entities e
+       JOIN session_map sm ON e.session_map_id = sm.id
+       WHERE sm.project_id = $1
+         AND e.type = 'file'
+         AND e.last_seen_at > NOW() - INTERVAL '14 days'
+       ORDER BY e.weight DESC, e.last_seen_at DESC
+       LIMIT $2`,
+      [projectId, limit],
+    );
+    if (rows.length === 0) return null;
+
+    const files = rows
+      .map((r: any) => `${r.name} (${Math.round(r.weight)}×)`)
+      .join(", ");
+    return `top files: ${files}`;
+  } catch (err) {
+    logger.warn("Failed to fetch project skeleton:", err);
+    return null;
+  }
+}
+
 export function formatInjectionBlock(
   memories: MemoryResult[],
   sessionSummary: string | null,
@@ -252,6 +285,7 @@ export function formatInjectionBlock(
   } | null,
   chains?: CausalChain[] | null,
   activeRules?: ActiveRule[] | null,
+  skeleton?: string | null,
 ): string {
   if (
     !project &&
@@ -259,7 +293,8 @@ export function formatInjectionBlock(
     !sessionSummary &&
     !economics &&
     (!chains || chains.length === 0) &&
-    (!activeRules || activeRules.length === 0)
+    (!activeRules || activeRules.length === 0) &&
+    !skeleton
   )
     return "";
 
@@ -310,6 +345,9 @@ export function formatInjectionBlock(
 
   if (project) {
     lines.push(`project: ${project}`);
+  }
+  if (skeleton) {
+    lines.push(`project skeleton: ${skeleton}`);
   }
 
   if (economics && economics.totalObservations > 0) {
@@ -964,6 +1002,11 @@ export async function buildInjectionBlock(
   // v3.9+: fetch applied rules from reflections table
   const activeRules = await fetchActiveRules(pool);
 
+  // v3.11+: project skeleton — top files known from entity extraction
+  const skeleton = input.project
+    ? await getProjectSkeleton(input.project, pool)
+    : null;
+
   return formatInjectionBlock(
     memories,
     summary,
@@ -971,5 +1014,6 @@ export async function buildInjectionBlock(
     economics ?? null,
     chains ?? null,
     activeRules,
+    skeleton,
   );
 }

@@ -6,18 +6,24 @@
 
 ## 1. 架构总览
 
-### v3.9+ 架构层次
+### v3.11+ 架构层次
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                    行为层 (NEW v3.9)                              │
+│                    行为层 (v3.9)                                  │
 │  apply-reflection → rules.md → Active Rules → Agent 行为改变      │
 │  ~/.config/opencode/rules.md 持久化,  system.transform 自动注入    │
 ├──────────────────────────────────────────────────────────────────┤
 │                    注入层 (src/injection/)                        │
 │  system-transform-injector   session-summary-writer              │
 │  observation-scorer          observation-cleanup                 │
-│  两路召回+混合评分+记忆压缩    自动写入+评分+清理+Active Rules      │
+│  两路召回+混合评分+记忆压缩+Active Rules+项目骨架                   │
+├──────────────────────────────────────────────────────────────────┤
+│                  知识图谱层 (v3.11 NEW)                           │
+│  entity-extractor.ts  entity-store.ts                            │
+│  正则从工具输出提取 file/function/class/module                   │
+│  INSERT ... ON CONFLICT 去重写入 entities + relations            │
+│  双部分唯一索引确保 (name, type, scope) 不重复                    │
 ├──────────────────────────────────────────────────────────────────┤
 │                  服务层 (src/services/)                           │
 │  short-term-memory.ts  memory-buffer.ts                          │
@@ -28,20 +34,20 @@
 │  process.env 单例  getConfig()  resolveEmbeddingApiKey()          │
 ├──────────────────────────────────────────────────────────────────┤
 │                    钩子层 (src/hooks/)                            │
-│  tool.execute.before/after  session.created/completed/compacting │
-│  message-updated (噪声过滤+重要性评分)                             │
+│  tool.execute.before/after (+实体提取)  session.created/completed │
+│  message-updated (噪声过滤+重要性评分+实体提取)                    │
 │  experimental.chat.system.transform                              │
 ├──────────────────────────────────────────────────────────────────┤
 │                    MCP 工具层 (src/mcp/)                          │
-│  recall_memory  hindsight_reflect  apply_reflection [NEW]        │
-│  import_document [DEPRECATED]  timeline  get_memory  delete_memory│
-│  knowledge-corpus (7工具)  session-logger (4工具)                 │
-│  backfill_embeddings  sync_health  ← 共 19 个                    │
+│  recall_memory (含实体关键词/语义检索)    hindsight_reflect        │
+│  apply_reflection  import_document [DEPRECATED]                  │
+│  timeline  get_memory  delete_memory  knowledge-corpus (7)        │
+│  session-logger (4)  backfill_embeddings  sync_health             │
 ├──────────────────────────────────────────────────────────────────┤
 │                    存储层 (PostgreSQL + pgvector)                  │
-│  session_map  observations(tier)  entities  relations            │
+│  session_map  observations(tier)  entities(唯一约束)  relations   │
 │  reflections(action_plan,applied_at)  topic_segments             │
-│  semantic_cache  token_usage_log  session_summaries              │
+│  semantic_cache  token_usage_log  session_summaries               │
 └──────────────────────────────────────────────────────────────────┘
 ```
 

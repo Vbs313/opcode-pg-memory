@@ -407,6 +407,19 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_entities_topic_segment ON entities(topic_segment_id);
     `);
 
+    // 实体唯一约束：按作用域区分子表索引 + 全局索引
+    // 方案：两部分索引避免 NULL 冲突（PG 中 NULL != NULL）
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_unique_session
+      ON entities (name, type, session_map_id)
+      WHERE session_map_id IS NOT NULL
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_unique_global
+      ON entities (name, type)
+      WHERE session_map_id IS NULL
+    `);
+
     // HNSW 索引 for entities (仅 pgvector 可用时)
     if (this.vectorAvailable) {
       await client.query(`
@@ -423,6 +436,12 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_relations_session_map ON relations(session_map_id);
       CREATE INDEX IF NOT EXISTS idx_relations_confidence ON relations(confidence) WHERE confidence >= 0.5;
       CREATE INDEX IF NOT EXISTS idx_relations_topic_segment ON relations(topic_segment_id);
+    `);
+
+    // 关系唯一约束：防止同一对实体间产生重复关系
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_relations_unique
+      ON relations (source_entity_id, target_entity_id, relation_type)
     `);
 
     // ── observations 表索引 ──

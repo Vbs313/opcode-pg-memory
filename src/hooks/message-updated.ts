@@ -1,16 +1,16 @@
 import { Pool } from "pg";
-import {
-  MessageUpdatedInput,
-  MessageUpdatedOutput,
-  EntityTier,
-  OpenCodeMessage,
-} from "../types";
+import { MessageUpdatedInput, MessageUpdatedOutput } from "../types";
 import { estimateTokens } from "../utils/token-budget";
 import { stripPrivateContent } from "../services/privacy";
 import { createLogger } from "../services/logger";
 import { getConfig } from "../config";
 import { addObservation } from "../services/short-term-memory";
 import { detectAgentId } from "../services/agent-context";
+import {
+  storeEntitiesAndRelations,
+  type EntitySeed,
+  type RelationSeed,
+} from "../services/entity-store";
 
 // ── 用户消息噪声过滤 ─────────────────────────────────────
 // 常见问候语和噪音模式，不存入 PG 也不注入短时记忆
@@ -315,143 +315,60 @@ async function storeMessage(
 */
 
 /**
- * 从消息内容中提取实体和关系（统一入口）
+ * 从消息内容中提取实体并存入知识图谱。
+ * 提取逻辑使用启发式规则，存储层复用 entity-store.ts。
  */
 async function extractEntitiesAndRelations(
-  sessionId: string,
+  sessionMapId: string,
   content: string,
-  externalSessionId: string,
+  _externalSessionId: string,
   pool: Pool,
   config: MessageUpdatedHandlerConfig,
 ): Promise<void> {
-  const extractedEntities = await extractEntities(
-    content,
-    sessionId,
-    pool,
-    config,
-  );
+  try {
+    const sanitizedContent = stripPrivateContent(content);
+    const extractedNames = heuristicEntityExtraction(sanitizedContent);
 
-  logger.info(`Extracted ${extractedEntities.length} entities`);
+    const seeds: EntitySeed[] = [];
+    for (const extracted of extractedNames.slice(
+      0,
+      config.maxEntitiesPerMessage,
+    )) {
+      if (extracted.name.length < config.minEntityNameLength) continue;
+      seeds.push({
+        name: extracted.name,
+        type: extracted.type as EntitySeed["type"],
+      });
+    }
 
-  if (extractedEntities.length >= 2) {
-    await extractAndStoreRelations(
-      extractedEntities,
-      content,
-      sessionId,
+    if (seeds.length === 0) return;
+
+    const relations: RelationSeed[] = [];
+    // 实体两两之间建立 REFERENCES 关系（同一消息中同时出现）
+    for (let i = 0; i < seeds.length; i++) {
+      for (let j = i + 1; j < seeds.length; j++) {
+        relations.push({
+          sourceName: seeds[i].name,
+          sourceType: seeds[i].type,
+          targetName: seeds[j].name,
+          targetType: seeds[j].type,
+          relationType: "references",
+        });
+      }
+    }
+
+    await storeEntitiesAndRelations(
+      { entities: seeds, relations },
+      sessionMapId,
       pool,
-      config,
     );
+  } catch (err) {
+    logger.warn("Entity extraction from message failed:", err);
   }
 }
 
 /**
- * 从消息内容中提取实体
- *
- * 注意：这是一个简化实现。生产环境应该调用 LLM API 进行 NER。
- */
-async function extractEntities(
-  content: string,
-  sessionId: string,
-  pool: Pool,
-  config: MessageUpdatedHandlerConfig,
-): Promise<Array<{ id: string; name: string; type: string }>> {
-  const entities: Array<{ id: string; name: string; type: string }> = [];
-
-  // 移除 <private> 标记内容后再进行实体提取
-  const sanitizedContent = stripPrivateContent(content);
-
-  // 基于规则的实体提取（简化版）
-  const extractedNames = heuristicEntityExtraction(sanitizedContent);
-
-  for (const extracted of extractedNames.slice(
-    0,
-    config.maxEntitiesPerMessage,
-  )) {
-    if (extracted.name.length < config.minEntityNameLength) {
-      continue;
-    }
-
-    // 模拟置信度（实际应从 LLM 获取）
-    const confidence = Math.random() * 0.5 + 0.5;
-
-    if (confidence < config.minConfidence) {
-      continue;
-    }
-
-    // 检查是否已存在相同实体
-    const existingResult = await pool.query(
-      `
-      SELECT id, weight FROM entities 
-      WHERE session_map_id = $1 AND name = $2 AND type = $3
-    `,
-      [sessionId, extracted.name, extracted.type],
-    );
-
-    if (existingResult.rows.length > 0) {
-      // 更新现有实体
-      const existingId = existingResult.rows[0].id;
-      const currentWeight = existingResult.rows[0].weight;
-
-      await pool.query(
-        `
-        UPDATE entities 
-        SET weight = LEAST(weight + 0.1, 10.0),
-            last_seen_at = NOW(),
-            confidence = GREATEST(confidence, $1)
-        WHERE id = $2
-      `,
-        [confidence, existingId],
-      );
-
-      entities.push({
-        id: existingId,
-        name: extracted.name,
-        type: extracted.type,
-      });
-
-      logger.info(
-        `Updated entity: ${extracted.name} (weight: ${(currentWeight + 0.1).toFixed(2)})`,
-      );
-    } else {
-      // 创建新实体
-      const tier = determineEntityTier(extracted.type, content);
-
-      const insertResult = await pool.query(
-        `
-        INSERT INTO entities (
-          session_id, name, type, tier, weight, description, 
-          confidence, metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id
-      `,
-        [
-          sessionId,
-          extracted.name,
-          extracted.type,
-          tier,
-          1.0,
-          generateEntityDescription(extracted.name, extracted.type, content),
-          confidence,
-          JSON.stringify({ source: "message.updated" }),
-        ],
-      );
-
-      const newId = insertResult.rows[0].id;
-      entities.push({
-        id: newId,
-        name: extracted.name,
-        type: extracted.type,
-      });
-
-      logger.info(`Created entity: ${extracted.name} (${extracted.type})`);
-    }
-  }
-
-  return entities;
-}
-
-/**
- * 启发式实体提取（简化版）
+ * 从消息文本中启发式提取实体（纯正则，零 LLM）
  */
 function heuristicEntityExtraction(
   content: string,
@@ -482,157 +399,4 @@ function heuristicEntityExtraction(
   }
 
   return entities;
-}
-
-/**
- * 确定实体层级
- */
-function determineEntityTier(type: string, content: string): EntityTier {
-  if (["constant", "config", "setting"].includes(type)) {
-    return "permanent";
-  }
-
-  if (["module", "class", "interface"].includes(type)) {
-    return "project";
-  }
-
-  return "session";
-}
-
-/**
- * 生成实体描述
- */
-function generateEntityDescription(
-  name: string,
-  type: string,
-  content: string,
-): string {
-  const index = content.indexOf(name);
-  if (index === -1) {
-    return `${type}: ${name}`;
-  }
-
-  const start = Math.max(0, index - 100);
-  const end = Math.min(content.length, index + name.length + 100);
-  const context = content.substring(start, end);
-
-  return `${type}: ${name} - ${context.trim()}`;
-}
-
-/**
- * 提取并存储实体间关系
- */
-async function extractAndStoreRelations(
-  entities: Array<{ id: string; name: string; type: string }>,
-  content: string,
-  sessionId: string,
-  pool: Pool,
-  config: MessageUpdatedHandlerConfig,
-): Promise<void> {
-  for (let i = 0; i < entities.length; i++) {
-    const source = entities[i];
-    let relationsCreated = 0;
-
-    for (
-      let j = 0;
-      j < entities.length && relationsCreated < config.maxRelationsPerEntity;
-      j++
-    ) {
-      if (i === j) continue;
-
-      const target = entities[j];
-      const proximity = checkEntityProximity(source.name, target.name, content);
-
-      if (proximity.score > 0.3) {
-        const confidence = proximity.score * (0.5 + Math.random() * 0.5);
-
-        if (confidence < config.minConfidence) {
-          continue;
-        }
-
-        const relationType = inferRelationType(
-          source.type,
-          target.type,
-          content,
-        );
-
-        const existingResult = await pool.query(
-          `
-          SELECT id FROM relations 
-          WHERE source_entity_id = $1 AND target_entity_id = $2
-        `,
-          [source.id, target.id],
-        );
-
-        if (existingResult.rows.length === 0) {
-          await pool.query(
-            `
-            INSERT INTO relations (
-              source_entity_id, target_entity_id, relation_type,
-              confidence, description, session_id
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-          `,
-            [
-              source.id,
-              target.id,
-              relationType,
-              confidence,
-              `${source.name} ${relationType} ${target.name}`,
-              sessionId,
-            ],
-          );
-
-          relationsCreated++;
-          logger.info(
-            `Created relation: ${source.name} ${relationType} ${target.name}`,
-          );
-        }
-      }
-    }
-  }
-}
-
-/**
- * 检查两个实体在文本中的接近程度
- */
-function checkEntityProximity(
-  name1: string,
-  name2: string,
-  content: string,
-): { score: number } {
-  const index1 = content.indexOf(name1);
-  const index2 = content.indexOf(name2);
-
-  if (index1 === -1 || index2 === -1) {
-    return { score: 0 };
-  }
-
-  const distance = Math.abs(index1 - index2);
-  const maxDistance = 500;
-
-  const score = Math.max(0, 1 - distance / maxDistance);
-  return { score };
-}
-
-/**
- * 推断关系类型
- */
-function inferRelationType(
-  sourceType: string,
-  targetType: string,
-  content: string,
-): string {
-  if (sourceType === "class" && targetType === "class") {
-    return content.includes("extends") ? "belongs_to" : "references";
-  }
-
-  if (sourceType === "function" && targetType === "function") {
-    return "depends_on";
-  }
-
-  if (sourceType === "module" || targetType === "module") {
-    return "uses";
-  }
-
-  return "references";
 }

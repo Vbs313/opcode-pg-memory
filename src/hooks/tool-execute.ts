@@ -13,6 +13,8 @@ import { detectAgentId } from "../services/agent-context";
 import { getConfig } from "../config";
 import { enqueueObservation } from "../services/memory-buffer";
 import { addObservation } from "../services/short-term-memory";
+import { extractEntities } from "../services/entity-extractor";
+import { storeEntitiesAndRelations } from "../services/entity-store";
 
 const logger = createLogger("tool-execute");
 
@@ -306,6 +308,29 @@ export async function handleToolExecuteAfter(
         }
       } catch {
         // Non-fatal: chain detection failure
+      }
+    }
+
+    // ── Entity extraction: populate knowledge graph from tool outputs ──
+    if (sessionInternalId && result.data && tool.name) {
+      try {
+        const { entities, relations } = extractEntities(
+          tool.name,
+          tool.parameters ?? {},
+          String(result.data),
+        );
+        if (entities.length > 0) {
+          // Fire-and-forget: never block the tool execution flow
+          storeEntitiesAndRelations(
+            { entities, relations },
+            sessionInternalId,
+            pool,
+          ).catch((err: Error) =>
+            logger.warn("Entity store failed:", err.message),
+          );
+        }
+      } catch {
+        // Non-fatal: extraction failure
       }
     }
 
