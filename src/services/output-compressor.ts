@@ -21,7 +21,10 @@ const logger = createLogger("output-compressor");
 // Config
 // ============================================================
 
-const MAX_LENGTH = 10_000;
+const MAX_LENGTH = parseInt(
+  process.env.PG_MEMORY_OUTPUT_MAX_CHARS || "10000",
+  10,
+);
 const MAX_LINES = 200;
 const REPEATED_LINE_LIMIT = 5;
 
@@ -138,6 +141,21 @@ const COMMAND_FILTERS: CommandFilter[] = [
 // ============================================================
 
 const fileReadRegistry = new Map<string, Map<string, number>>();
+const FILE_READ_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // 30 分钟
+
+// 定期清理 fileReadRegistry，防止内存泄漏
+let fileReadCleanupTimer: ReturnType<typeof setInterval> | null = null;
+function ensureFileReadCleanup(): void {
+  if (fileReadCleanupTimer) return;
+  fileReadCleanupTimer = setInterval(() => {
+    const size = fileReadRegistry.size;
+    if (size === 0) return;
+    fileReadRegistry.clear();
+    logger.debug(`Cleared fileReadRegistry (was ${size} sessions)`);
+  }, FILE_READ_CLEANUP_INTERVAL_MS);
+  fileReadCleanupTimer.unref();
+}
+ensureFileReadCleanup();
 
 function registerRead(
   sessionId: string,
@@ -258,7 +276,7 @@ export function compressOutput(
   if (result.length > ml3) {
     result =
       result.substring(0, ml3) +
-      `\n... [truncated at ${(ml3 / 1024).toFixed(0)}KB]`;
+      `\n... [truncated at ${(ml3 / 1024).toFixed(0)}KB by opcode-pg-memory]`;
   }
 
   const saved = originalChars - result.length;
@@ -266,6 +284,12 @@ export function compressOutput(
   logger.info(
     `[${tool}] ${(originalChars / 1024).toFixed(0)}KB→${(result.length / 1024).toFixed(0)}KB (-${(saved / 1024) | 0}KB, ${Math.round((saved / originalChars) * 100)}%)`,
   );
+  // 若压缩后仍超过典型 truncation 阈值，记录警告
+  if (result.length > 4000) {
+    logger.warn(
+      `[${tool}] compressed output ${result.length}chars may still be truncated by platform`,
+    );
+  }
   return {
     compressed: result,
     originalChars,

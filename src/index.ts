@@ -5,6 +5,7 @@ import { handleSessionCreated } from "./hooks/session-created";
 import {
   handleToolExecuteBefore,
   handleToolExecuteAfter,
+  clearSessionCache,
 } from "./hooks/tool-execute";
 import { handleMessageUpdated } from "./hooks/message-updated";
 import { cleanupExpiredAccumulators } from "./hooks/message-part-updated";
@@ -352,9 +353,10 @@ export const OpenCodePGMemory: Plugin = async (ctx: PluginContext) => {
         // Clear short-term memory when session is deleted
         if (type === "session.deleted") {
           clearSession(sid);
+          clearSessionCache(sid);
         }
       } catch (error) {
-        console.error(`[PG Memory] Error handling event '${type}':`, error);
+        logger.error(`Error handling event '${type}':`, error);
       }
     },
 

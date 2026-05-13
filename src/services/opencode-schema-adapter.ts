@@ -429,7 +429,9 @@ export class OpenCodeSchemaAdapter {
     if (this.db) {
       try {
         this.db.close();
-      } catch {}
+      } catch {
+        // SQLite close errors are non-fatal during cleanup
+      }
       this.db = null;
     }
   }

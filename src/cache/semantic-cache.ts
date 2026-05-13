@@ -1,6 +1,9 @@
 import { Pool } from "pg";
 import * as crypto from "crypto";
 import { SemanticCache, CacheResult } from "../types";
+import { createLogger } from "../services/logger";
+
+const logger = createLogger("semantic-cache");
 
 export interface SemanticCacheConfig {
   initialThreshold: number;
@@ -149,7 +152,7 @@ export class SemanticCacheManager {
         cached: false,
       };
     } catch (error) {
-      console.error("[PG Memory] Cache check error:", error);
+      logger.error("Cache check error:", error);
       return { hit: false };
     }
   }
@@ -216,7 +219,7 @@ export class SemanticCacheManager {
 
       return result.rows[0].id;
     } catch (error) {
-      console.error("[PG Memory] Cache store error:", error);
+      logger.error("Cache store error:", error);
       return null;
     }
   }

@@ -67,6 +67,18 @@
 | `OMO_ENABLED` | `(空)` | 设为 `true` 启用 OmO schema 扩展 |
 | `PLATFORM` | `opencode` | 平台标识，写入 observations 的 `platform_source` |
 | `LOG_LEVEL` | `info` | 日志级别：`debug` / `info` / `warn` / `error` |
+| `PG_MEMORY_OUTPUT_MAX_CHARS` | `10000` | 输出压缩器 Stage 3 硬截断长度。建议与 oh-my-openagent 的 `truncate_all_tool_outputs` 对齐 |
+
+### 输出压缩与 oh-my-openagent 的关系
+
+`compressOutput` 在 `tool.execute.after` 钩子中运行，**优先于** oh-my-openagent 的 `truncate_all_tool_outputs`。
+即：opcode-pg-memory 压缩**原始输出**，oh-my-openagent 再对已压缩的输出做二次截断（通常为空操作）。
+
+| 场景 | compressOutput | oh-my-openagent truncation | 影响 |
+|------|---------------|---------------------------|------|
+| 大输出 (git diff 80KB) | raw→~2KB (filter 生效) | 2KB → 不变 | ✅ 压缩优先，truncation 空操作 |
+| 中输出 (npm install 30KB) | raw→~1KB (filter 生效) | 1KB → 不变 | ✅ 同上 |
+| 小输出 (< 500 chars) | 返回 null (不变) | 原始→可能截断 | ⚠️ 数据量小，截断无害 |
 
 ---
 

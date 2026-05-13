@@ -3,19 +3,23 @@
  *
  * 将 hindsight_reflect 产出的可执行模式（ActionPlan）应用到 Agent 行为层：
  * 1. 读取 reflection + action_plan
- * 2. 追加到 ~/.config/opencode/rules.md
+ * 2. 追加到 ~/.config/opencode/rules.md（异步原子写入）
  * 3. 标记 reflections.applied_at
  *
  * 设计原则：
  * - 幂等：已应用的 pattern 不会重复写入
  * - 可逆：只追加，不删除
+ * - 原子：使用临时文件 + rename 防止并发写入破坏
  * - 不阻塞：所有错误 try/catch，返回结构化错误
  */
 
 import { Pool } from "pg";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFile, writeFile, rename, mkdir } from "fs/promises";
+import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
+import { tmpdir } from "os";
+import { randomUUID } from "crypto";
 import { createLogger } from "../services/logger";
 
 const logger = createLogger("apply-reflection");
@@ -27,9 +31,7 @@ function getRulesMdPath(): string {
   const configDir = process.env.XDG_CONFIG_HOME
     ? join(process.env.XDG_CONFIG_HOME, "opencode")
     : join(homedir(), ".config", "opencode");
-  const path = join(configDir, "rules.md");
-  logger.debug(`rules.md path: ${path}`);
-  return path;
+  return join(configDir, "rules.md");
 }
 
 // ── 输入输出类型 ──────────────────────────────────────
@@ -52,65 +54,69 @@ export interface ApplyReflectionOutput {
 
 const AUTO_SECTION_HEADER = "## Automated Rules (from opcode-pg-memory)";
 
+/** rules.md 不存在时返回的默认内容 */
+const DEFAULT_RULES_CONTENT = "# Project Rules\n";
+
 /**
- * 读取 rules.md 全文；文件不存在则返回空内容（含 # Project Rules 头）。
+ * 异步读取 rules.md；文件不存在则返回默认内容。
  */
-function readRulesMd(path: string): string {
+async function readRulesMd(path: string): Promise<string> {
   try {
-    if (!existsSync(path)) {
-      return "# Project Rules\n";
+    return await readFile(path, "utf-8");
+  } catch (err: any) {
+    if (err.code === "ENOENT") {
+      return DEFAULT_RULES_CONTENT;
     }
-    return readFileSync(path, "utf-8");
-  } catch (err) {
     logger.warn("Failed to read rules.md, starting fresh:", err);
-    return "# Project Rules\n";
+    return DEFAULT_RULES_CONTENT;
   }
 }
 
 /**
  * 在 rules.md 中追加一条规则。
- * 如果已有 "## Automated Rules" 区段则追加到该区段末尾，
- * 否则在文件末尾新建该区段。
+ * 使用 写入临时文件 → rename 的原子写模式防止并发破坏。
  */
-function appendRuleToRulesMd(path: string, ruleBullet: string): void {
-  let content = readRulesMd(path);
+async function appendRuleToRulesMd(
+  path: string,
+  ruleBullet: string,
+): Promise<void> {
+  const content = await readRulesMd(path);
+  const normalized = content.endsWith("\n") ? content : content + "\n";
 
-  // 规范化换行
-  if (!content.endsWith("\n")) content += "\n";
-
-  const sectionStart = content.indexOf(AUTO_SECTION_HEADER);
+  const sectionStart = normalized.indexOf(AUTO_SECTION_HEADER);
+  let newContent: string;
 
   if (sectionStart === -1) {
     // 没有自动化规则区段 → 在末尾新建
-    content += `\n${AUTO_SECTION_HEADER}\n${ruleBullet}\n`;
+    newContent = normalized + `\n${AUTO_SECTION_HEADER}\n${ruleBullet}\n`;
   } else {
-    // 已有区段 → 在区段末尾追加（区段结束于下一个 ## 或文件末尾）
-    const restAfterSection = content.slice(
+    // 已有区段 → 在区段末尾追加
+    const afterHeader = normalized.slice(
       sectionStart + AUTO_SECTION_HEADER.length,
     );
-    const nextSectionMatch = restAfterSection.match(/\n## /);
+    const nextSection = afterHeader.match(/\n## /);
+    const insertPos = nextSection
+      ? sectionStart + AUTO_SECTION_HEADER.length + nextSection.index!
+      : normalized.length;
 
-    let insertPos: number;
-    if (nextSectionMatch) {
-      insertPos =
-        sectionStart + AUTO_SECTION_HEADER.length + nextSectionMatch.index!;
-    } else {
-      insertPos = content.length;
-    }
-
-    // 在 insertPos 之前插入新规则
-    const before = content.slice(0, insertPos);
-    const after = content.slice(insertPos);
-    content = before + ruleBullet + "\n" + after;
+    newContent =
+      normalized.slice(0, insertPos) +
+      ruleBullet +
+      "\n" +
+      normalized.slice(insertPos);
   }
 
   // 确保父目录存在
   const parentDir = dirname(path);
   if (!existsSync(parentDir)) {
-    mkdirSync(parentDir, { recursive: true });
+    await mkdir(parentDir, { recursive: true });
   }
 
-  writeFileSync(path, content, "utf-8");
+  // 原子写入：写临时文件 → rename 覆盖目标
+  const tmpPath = join(tmpdir(), `rules-${randomUUID()}.md.tmp`);
+  await writeFile(tmpPath, newContent, "utf-8");
+  await rename(tmpPath, path);
+
   logger.info(`Wrote rule to ${path}`);
 }
 
@@ -185,11 +191,11 @@ export async function applyReflection(
       };
     }
 
-    // 4. 格式化并写入 rules.md
+    // 4. 格式化并异步原子写入 rules.md
     const ruleMdPath = getRulesMdPath();
     const rule = formatRule(row.pattern_type, row.action_plan, row.summary);
 
-    appendRuleToRulesMd(ruleMdPath, rule);
+    await appendRuleToRulesMd(ruleMdPath, rule);
 
     // 5. 标记 applied_at
     await pool.query(

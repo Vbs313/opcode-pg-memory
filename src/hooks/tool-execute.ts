@@ -16,6 +16,39 @@ import { addObservation } from "../services/short-term-memory";
 
 const logger = createLogger("tool-execute");
 
+// ============================================================
+// Session ID 缓存 — 避免每次工具调用重复查询 session_map
+// ============================================================
+
+const sessionIdCache = new Map<string, { internalId: string; ts: number }>();
+const SESSION_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟
+
+async function resolveSessionInternalId(
+  sessionId: string,
+  pool: Pool,
+): Promise<string | null> {
+  const cached = sessionIdCache.get(sessionId);
+  if (cached && Date.now() - cached.ts < SESSION_CACHE_TTL_MS) {
+    return cached.internalId;
+  }
+
+  const result = await pool.query(
+    "SELECT id FROM session_map WHERE opencode_session_id = $1",
+    [sessionId],
+  );
+
+  if (result.rows.length === 0) return null;
+
+  const internalId = result.rows[0].id as string;
+  sessionIdCache.set(sessionId, { internalId, ts: Date.now() });
+  return internalId;
+}
+
+/** 清除 session 缓存（session 删除/完成时调用） */
+export function clearSessionCache(sessionId: string): void {
+  sessionIdCache.delete(sessionId);
+}
+
 export interface ToolExecuteHandlerConfig {
   maxInputSummaryLength: number;
   maxOutputSummaryLength: number;
@@ -49,18 +82,12 @@ export async function handleToolExecuteBefore(
   logger.info(`Tool execute before: ${tool.name}`);
 
   try {
-    // 获取 session 内部 ID
-    const sessionResult = await pool.query(
-      "SELECT id FROM session_map WHERE opencode_session_id = $1",
-      [session.id],
-    );
-
-    if (sessionResult.rows.length === 0) {
+    // 获取 session 内部 ID（带缓存）
+    const sessionInternalId = await resolveSessionInternalId(session.id, pool);
+    if (!sessionInternalId) {
       logger.warn(`Session not found: ${session.id}`);
-      return; // ✅ 返回 void 而非 {}
+      return;
     }
-
-    const sessionInternalId = sessionResult.rows[0].id;
 
     // 生成输入摘要
     const inputSummary = summarizeToolInput(
@@ -139,18 +166,12 @@ export async function handleToolExecuteAfter(
   let importance = 3;
 
   try {
-    // 获取 session 内部 ID
-    const sessionResult = await pool.query(
-      "SELECT id FROM session_map WHERE opencode_session_id = $1",
-      [session.id],
-    );
-
-    if (sessionResult.rows.length === 0) {
+    // 获取 session 内部 ID（缓存查询）
+    sessionInternalId = await resolveSessionInternalId(session.id, pool);
+    if (!sessionInternalId) {
       logger.warn(`Session not found: ${session.id}`);
-      return; // ✅ 返回 void
+      return;
     }
-
-    sessionInternalId = sessionResult.rows[0].id;
 
     // 生成输出摘要
     outputSummary = summarizeToolOutput(

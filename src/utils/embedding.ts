@@ -1,4 +1,7 @@
 import OpenAI from "openai";
+import { createLogger } from "../services/logger";
+
+const logger = createLogger("embedding");
 
 export interface EmbeddingConfig {
   provider: "openai" | "deepseek" | "ollama";
@@ -75,7 +78,7 @@ export class EmbeddingService {
         return this.averageEmbeddings(embeddings);
       }
     } catch (error) {
-      console.error(`[Embedding] Failed to generate embedding:`, error);
+      logger.error("Failed to generate embedding:", error);
       throw error;
     }
   }

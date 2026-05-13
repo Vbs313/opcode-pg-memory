@@ -27,9 +27,12 @@ export class DatabaseInitializer {
   private pool: Pool | null = null;
   private config: DatabaseConfig;
   private logger = createLogger("init-db");
+  /** 从运行配置读取的向量维度，默认 1024 匹配 qwen3-embedding */
+  private embeddingDim: number;
 
   constructor(config: Partial<DatabaseConfig> = {}) {
     this.config = { ...DEFAULT_DB_CONFIG, ...config };
+    this.embeddingDim = getConfig().embeddingDimensions || 1024;
   }
 
   async initialize(): Promise<Pool> {
@@ -161,7 +164,7 @@ export class DatabaseInitializer {
         session_map_id UUID NOT NULL REFERENCES session_map(id) ON DELETE CASCADE,
         segment_index INTEGER NOT NULL,
         summary TEXT,
-        embedding vector(1536),
+        embedding vector(${this.embeddingDim}),
         start_message_external_id VARCHAR(255),
         end_message_external_id VARCHAR(255),
         created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -183,7 +186,7 @@ export class DatabaseInitializer {
         tier entity_tier DEFAULT 'session',
         weight FLOAT DEFAULT 1.0 CHECK (weight >= 0 AND weight <= 10),
         description TEXT,
-        embedding vector(1536),
+        embedding vector(${this.embeddingDim}),
         first_seen_at TIMESTAMPTZ DEFAULT NOW(),
         last_seen_at TIMESTAMPTZ DEFAULT NOW(),
         confidence FLOAT DEFAULT 0.8 CHECK (confidence >= 0 AND confidence <= 1),
@@ -219,7 +222,7 @@ export class DatabaseInitializer {
         learned TEXT,
         completed TEXT,
         next_steps TEXT,
-        summary_embedding vector(1536),
+        summary_embedding vector(${this.embeddingDim}),
         token_count INTEGER DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -243,7 +246,7 @@ export class DatabaseInitializer {
         tool_name VARCHAR(255),
         tool_input_summary TEXT,
         tool_output_summary TEXT,
-        embedding vector(1536),
+        embedding vector(${this.embeddingDim}),
         importance INTEGER DEFAULT 3 CHECK (importance >= 1 AND importance <= 5),
         created_at TIMESTAMPTZ DEFAULT NOW(),
         message_id VARCHAR(255),
@@ -269,7 +272,7 @@ export class DatabaseInitializer {
         confidence FLOAT DEFAULT 0.8 CHECK (confidence >= 0 AND confidence <= 1),
         pattern_type VARCHAR(100),
         created_at TIMESTAMPTZ DEFAULT NOW(),
-        embedding vector(1536),
+        embedding vector(${this.embeddingDim}),
         metadata JSONB DEFAULT '{}'
       );
     `);
@@ -293,7 +296,7 @@ export class DatabaseInitializer {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         query_hash VARCHAR(64) UNIQUE NOT NULL,
         query_text TEXT NOT NULL,
-        query_embedding vector(1536) NOT NULL,
+        query_embedding vector(${this.embeddingDim}) NOT NULL,
         response_text TEXT NOT NULL,
         hit_count INTEGER DEFAULT 1,
         last_hit_at TIMESTAMPTZ DEFAULT NOW(),

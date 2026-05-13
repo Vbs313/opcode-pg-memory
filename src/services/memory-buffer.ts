@@ -102,56 +102,43 @@ async function flush(): Promise<void> {
   }
   if (!poolRef) return;
 
+  const client = await poolRef.connect();
+  let batch: BufferedObservation[] = [];
   try {
-    const batch = queue.splice(0); // drain entire queue
-    let successCount = 0;
+    batch = queue.splice(0); // drain entire queue
 
+    await client.query("BEGIN");
     for (const obs of batch) {
-      try {
-        await poolRef.query(
-          `INSERT INTO observations
-           (session_map_id, tool_name, tool_input_summary, tool_output_summary,
-            importance, metadata, platform_source, agent_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [
-            obs.sessionMapId,
-            obs.toolName,
-            obs.toolInputSummary,
-            obs.toolOutputSummary,
-            obs.importance,
-            JSON.stringify(obs.metadata),
-            obs.platformSource,
-            obs.agentId,
-          ],
-        );
-        successCount++;
-      } catch {
-        // Individual insert failed — put it back
-        queue.push(obs);
-      }
-    }
-
-    if (successCount > 0) {
-      logger.info(
-        `Flushed ${successCount} observations to PG (queue: ${queue.length})`,
+      await client.query(
+        `INSERT INTO observations
+         (session_map_id, tool_name, tool_input_summary, tool_output_summary,
+          importance, metadata, platform_source, agent_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          obs.sessionMapId,
+          obs.toolName,
+          obs.toolInputSummary,
+          obs.toolOutputSummary,
+          obs.importance,
+          JSON.stringify(obs.metadata),
+          obs.platformSource,
+          obs.agentId,
+        ],
       );
-      retryCount = 0;
     }
+    await client.query("COMMIT");
 
-    // If nothing was flushed and queue still has items, count as retry
-    if (successCount === 0 && queue.length > 0) {
-      retryCount++;
-      if (retryCount >= MAX_RETRIES) {
-        logger.error(
-          `Dropping ${queue.length} observations after ${MAX_RETRIES} failed retries`,
-        );
-        queue.length = 0;
-        stopFlushTimer();
-        retryCount = 0;
-      }
-    }
+    logger.info(
+      `Flushed ${batch.length} observations to PG (queue: ${queue.length})`,
+    );
+    retryCount = 0;
   } catch (error) {
-    logger.error("Flush failed", error);
+    await client.query("ROLLBACK").catch(() => {});
+    logger.error("Flush failed, re-queuing batch:", error);
+    // 整批回队列重试
+    // batch 已在上面被 splice 取出，但 COMMIT 没执行，所以数据未写入
+    // 我们需要把 batch 放回队列
+    queue.unshift(...batch);
     retryCount++;
     if (retryCount >= MAX_RETRIES) {
       logger.error(
@@ -161,5 +148,7 @@ async function flush(): Promise<void> {
       stopFlushTimer();
       retryCount = 0;
     }
+  } finally {
+    client.release();
   }
 }

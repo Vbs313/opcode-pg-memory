@@ -2,6 +2,7 @@ import { handleSessionCreated } from "../src/hooks/session-created";
 import {
   handleToolExecuteBefore,
   handleToolExecuteAfter,
+  clearSessionCache,
 } from "../src/hooks/tool-execute";
 import { handleMessageUpdated } from "../src/hooks/message-updated";
 
@@ -14,6 +15,7 @@ const mockPool = {
 describe("OpenCode Hooks", () => {
   beforeEach(() => {
     mockQuery.mockClear();
+    clearSessionCache("session-123");
   });
 
   describe("session.created", () => {
