@@ -83,11 +83,16 @@ async function appendRuleToRulesMd(
   const content = await readRulesMd(path);
   const normalized = content.endsWith("\n") ? content : content + "\n";
 
-  // ── 去重：检查相同规则是否已存在（用首行 When 语句做 key）──
+  // ── 去重：标准化比较（折叠空格 + 精确行匹配）──
   const whenLine = ruleBullet.split("\n")[0]?.trim();
-  if (whenLine && normalized.includes(whenLine)) {
-    logger.info("Rule already exists in rules.md, skipping dedup append");
-    return;
+  if (whenLine) {
+    // 折叠连续空格后再比较，防止细微空白差异导致漏判
+    const normalizedWhen = whenLine.replace(/\s+/g, " ");
+    const normalizedContent = content.replace(/\s+/g, " ");
+    if (normalizedContent.includes(normalizedWhen)) {
+      logger.info("Rule already exists in rules.md, skipping dedup append");
+      return;
+    }
   }
 
   const sectionStart = normalized.indexOf(AUTO_SECTION_HEADER);

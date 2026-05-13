@@ -260,7 +260,32 @@ async function getProjectSkeleton(
        ORDER BY e.weight DESC, e.last_seen_at DESC`,
       [projectId],
     );
-    if (rows.length === 0) return null;
+    if (rows.length === 0) {
+      // Fallback: 无 file 实体时查 module/function 实体
+      const { rows: fallbackRows } = await pool.query(
+        `SELECT e.name, e.weight
+         FROM entities e
+         JOIN session_map sm ON e.session_map_id = sm.id
+         WHERE sm.project_id = $1
+           AND e.type IN ('module', 'function')
+           AND e.last_seen_at > NOW() - INTERVAL '14 days'
+         ORDER BY e.weight DESC
+         LIMIT 10`,
+        [projectId],
+      );
+      if (fallbackRows.length === 0) return null;
+      let skeleton = "top modules: ";
+      let budget = estimateTokens(skeleton);
+      for (const row of fallbackRows) {
+        const entry = `${row.name} (${Math.round(row.weight)}×)`;
+        const cost = estimateTokens(entry + ", ");
+        if (budget + cost > maxTokens) break;
+        skeleton +=
+          (budget === estimateTokens("top modules: ") ? "" : ", ") + entry;
+        budget += cost;
+      }
+      return skeleton === "top modules: " ? null : skeleton;
+    }
 
     let skeleton = "top files: ";
     let budget = estimateTokens(skeleton);
