@@ -272,23 +272,37 @@ async function executeReflection(
     );
     const { generated_reflections } = result;
     let appliedCount = 0;
+    let skillCount = 0;
     for (const ref of generated_reflections) {
       if (ref.confidence >= 0.8 && (ref as any).action_plan) {
+        // 1. 始终写入 rules.md（低价值规则也适合平面追加）
         const appResult = await applyReflection({ pattern_id: ref.id }, pool);
         if (appResult.applied) {
           appliedCount++;
           logger.info(`Auto-applied ${ref.id} (${ref.pattern_type})`);
         }
-        // 同时生成 skill 文件（无论 apply 是否成功，独立尝试）
-        writeSkillFromReflection({
-          pattern_type: ref.pattern_type,
-          summary: ref.summary,
-          confidence: ref.confidence,
-          action_plan: (ref as any).action_plan,
-          id: ref.id!.toString(),
-        }).catch((err: Error) =>
-          logger.warn("Skill write failed:", err.message),
-        );
+        // 2. 仅高价值模式写入 skills/（confidence ≥ 0.85 + 非简单 rule）
+        const plan = (ref as any).action_plan;
+        const isHighValue =
+          ref.confidence >= 0.85 && plan?.action?.type !== "rule";
+        if (isHighValue) {
+          writeSkillFromReflection({
+            pattern_type: ref.pattern_type,
+            summary: ref.summary,
+            confidence: ref.confidence,
+            action_plan: plan,
+            id: ref.id!.toString(),
+          })
+            .then((path) => {
+              if (path) {
+                skillCount++;
+                logger.info(`Skill written: ${path}`);
+              }
+            })
+            .catch((err: Error) =>
+              logger.warn("Skill write failed:", err.message),
+            );
+        }
       }
     }
     await pool.query(
