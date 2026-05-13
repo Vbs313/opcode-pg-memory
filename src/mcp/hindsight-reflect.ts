@@ -12,7 +12,7 @@ export interface HindsightReflectInput {
   session_id?: string;
   omo_task_id?: string;
   topic_segment_id?: string;
-  trigger_type?: "manual" | "threshold" | "scheduled";
+  trigger_type?: "manual" | "threshold" | "scheduled" | "auto";
   model_size?: "7b" | "14b" | "full";
   aggregate?: boolean;
   /** @deprecated Backward compat — threshold is now in HindsightReflectConfig */
@@ -704,6 +704,46 @@ async function reflectOnSegment(
 
     // Convert patterns to Reflection records and store
     for (const pattern of llmResult.patterns) {
+      // ── Effectiveness check: if same pattern_type was already applied, adjust confidence ──
+      if (
+        pattern.confidence >= config.minConfidence &&
+        (pattern.pattern_type === "error_pattern" ||
+          pattern.pattern_type === "workflow")
+      ) {
+        try {
+          const prevApplied = await pool.query(
+            `SELECT r.id, r.applied_at,
+                    (SELECT COUNT(*) FROM observations
+                     WHERE created_at > r.applied_at
+                       AND (tool_output_summary ILIKE '%error%' OR tool_output_summary ILIKE '%failed%')
+                       AND importance >= 3) as error_count
+             FROM reflections r
+             WHERE r.pattern_type = $1
+               AND r.applied_at IS NOT NULL
+               AND r.applied_at > NOW() - INTERVAL '30 days'
+               AND r.id != $2
+             ORDER BY r.applied_at DESC
+             LIMIT 1`,
+            [pattern.pattern_type, pattern.source_observation_ids[0] || ""],
+          );
+          if (prevApplied.rows.length > 0) {
+            const prev = prevApplied.rows[0];
+            const errorCount = parseInt(prev.error_count, 10);
+            if (errorCount >= 5) {
+              // Previous similar rule was NOT effective — lower confidence
+              pattern.confidence = Math.max(pattern.confidence - 0.5, 0.1);
+              if (!pattern.applicability) pattern.applicability = "";
+              pattern.applicability += ` [note: previous ${pattern.pattern_type} rule (${prev.id.substring(0, 8)}) ineffective — ${errorCount} errors since apply]`;
+            } else if (errorCount === 0) {
+              // Previous rule was effective — slightly boost confidence
+              pattern.confidence = Math.min(pattern.confidence + 0.1, 0.95);
+            }
+          }
+        } catch {
+          // Non-fatal: effectiveness check failure
+        }
+      }
+
       if (pattern.confidence >= config.minConfidence) {
         const reflection = await storeReflection(
           pattern,

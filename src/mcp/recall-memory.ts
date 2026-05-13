@@ -1,8 +1,8 @@
-import { Pool } from 'pg';
-import { createLogger } from '../services/logger';
-import { getEmbeddingService, EmbeddingService } from '../utils/embedding';
+import { Pool } from "pg";
+import { createLogger } from "../services/logger";
+import { getEmbeddingService, EmbeddingService } from "../utils/embedding";
 
-const logger = createLogger('recall-memory');
+const logger = createLogger("recall-memory");
 
 // ============================================================
 // Interfaces (enhanced — backward compatible with old MCP handler)
@@ -19,16 +19,18 @@ export interface RecallMemoryInput {
   topic_segment_id?: string;
   /** Caller metadata for topic-context fusion and agent-aware retrieval */
   caller_context?: {
-    type: 'user' | 'omo_agent';
+    type: "user" | "omo_agent";
     current_goal?: string;
     current_session_id?: string;
   };
   /** Retrieval scope. 'session' = current session only, 'task' = all sessions in same task, 'project' = all sessions in same project. Default: 'session' */
-  scope?: 'session' | 'task' | 'project';
+  scope?: "session" | "task" | "project";
   /** When true, consecutive same-tool observations are aggregated into summary lines. Default: false */
   aggregate_similar?: boolean;
   /** Retrieval strategies to execute in parallel. Default: ['semantic', 'bm25', 'graph'] */
-  retrieval_strategies?: Array<'semantic' | 'bm25' | 'graph' | 'keyword' | 'temporal'>;
+  retrieval_strategies?: Array<
+    "semantic" | "bm25" | "graph" | "keyword" | "temporal"
+  >;
   /** Max results to return. Default: 10 */
   max_results?: number;
   /** Filters applied post-retrieval */
@@ -36,9 +38,9 @@ export interface RecallMemoryInput {
     min_confidence?: number;
     min_importance?: number;
     /** Single tier filter */
-    tier?: 'permanent' | 'project' | 'session';
+    tier?: "permanent" | "project" | "session";
     /** Backward compat: array of tier levels (maps to tier for single value) */
-    tier_levels?: Array<'permanent' | 'project' | 'session'>;
+    tier_levels?: Array<"permanent" | "project" | "session">;
     entity_types?: string[];
     exclude_topic_segment_ids?: string[];
     /** Time range in days (backward compat) */
@@ -50,7 +52,7 @@ export interface RecallMemoryInput {
 
 export interface MemoryResult {
   id: string;
-  type: 'entity' | 'observation' | 'reflection' | 'relation';
+  type: "entity" | "observation" | "reflection" | "relation";
   /** Structured data payload for the new interface */
   data: Record<string, any>;
   relevance_score: number;
@@ -98,8 +100,8 @@ export interface RecallMemoryConfig {
 
 export interface DecayConfig {
   enabled: boolean;
-  factor: number;       // per-day decay factor (0.99 = 1% per day)
-  maxAgeDays: number;    // entities older than this get filtered out
+  factor: number; // per-day decay factor (0.99 = 1% per day)
+  maxAgeDays: number; // entities older than this get filtered out
 }
 
 // ============================================================
@@ -159,9 +161,9 @@ export async function recallMemory(
     const sessionId = await resolveSessionId(input, pool);
 
     // ── Step 0b: Resolve scope to session IDs ──
-    const scope = input.scope || 'session';
+    const scope = input.scope || "session";
     const sessionIds = await resolveScopeToSessionIds(pool, sessionId, scope);
-    if (scope !== 'session') {
+    if (scope !== "session") {
       logger.info(`Scope ${scope}: ${sessionIds.length} sessions`);
     }
 
@@ -169,14 +171,16 @@ export async function recallMemory(
     const embeddingService = getEmbeddingService();
     if (!embeddingService) {
       throw new Error(
-        'Embedding service is not available. Check EMBEDDING_PROVIDER and API keys.',
+        "Embedding service is not available. Check EMBEDDING_PROVIDER and API keys.",
       );
     }
-    const queryEmbedding = await embeddingService.generateEmbedding(input.query);
+    const queryEmbedding = await embeddingService.generateEmbedding(
+      input.query,
+    );
 
     // ── Step 2: Topic context fusion ──
     let fusedEmbedding = queryEmbedding;
-    let contextUsed: RecallMemoryOutput['context_used'] | undefined;
+    let contextUsed: RecallMemoryOutput["context_used"] | undefined;
 
     const effectiveSessionId =
       input.caller_context?.current_session_id || input.session_id;
@@ -198,7 +202,11 @@ export async function recallMemory(
     }
 
     // ── Step 3: Multi-strategy parallel retrieval ──
-    const strategies = input.retrieval_strategies || ['semantic', 'bm25', 'graph'];
+    const strategies = input.retrieval_strategies || [
+      "semantic",
+      "bm25",
+      "graph",
+    ];
     const retrievalResults = await parallelRetrieve(
       input.query,
       fusedEmbedding,
@@ -237,11 +245,17 @@ export async function recallMemory(
     filteredResults = filteredResults.slice(0, maxResults);
 
     // ── Step 9: Enrich with context ──
-    const enrichedResults = await enrichWithContext(filteredResults, sessionId, pool);
+    const enrichedResults = await enrichWithContext(
+      filteredResults,
+      sessionId,
+      pool,
+    );
 
     // ── Step 10: Convert to structured MemoryResult ──
     const results: MemoryResult[] = enrichedResults.map((fact) => {
-      const id = fact.id || `fallback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const id =
+        fact.id ||
+        `fallback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       return {
         id,
         type: mapType(fact.type),
@@ -250,7 +264,7 @@ export async function recallMemory(
         context: {
           session_id: fact._sessionId || sessionId,
           omo_task_id: fact._omoTaskId,
-          topic_segment_id: fact._topicSegmentId || 'unknown',
+          topic_segment_id: fact._topicSegmentId || "unknown",
           topic_summary: fact._topicSummary,
           timestamp: fact._timestamp || new Date().toISOString(),
         },
@@ -268,9 +282,13 @@ export async function recallMemory(
 
     const retrievalTime = Date.now() - startTime;
     if (retrievalTime > 1000) {
-      logger.warn(`slow recall_memory: ${results.length} results in ${retrievalTime}ms`);
+      logger.warn(
+        `slow recall_memory: ${results.length} results in ${retrievalTime}ms`,
+      );
     } else {
-      logger.info(`recall_memory completed: ${results.length} results in ${retrievalTime}ms`);
+      logger.info(
+        `recall_memory completed: ${results.length} results in ${retrievalTime}ms`,
+      );
     }
 
     return {
@@ -284,7 +302,7 @@ export async function recallMemory(
       session_id: sessionId,
     };
   } catch (error: any) {
-    logger.error('recall_memory error:', error);
+    logger.error("recall_memory error:", error);
     const retrievalTime = Date.now() - startTime;
     return {
       query: input.query,
@@ -293,7 +311,7 @@ export async function recallMemory(
       total_found: 0,
       retrieval_time_ms: retrievalTime,
       strategies_used: [],
-      session_id: '',
+      session_id: "",
       error: error.message || String(error),
     };
   }
@@ -305,7 +323,7 @@ export async function recallMemory(
 
 interface InternalFact {
   id?: string;
-  type: 'entity' | 'observation' | 'reflection' | 'relation' | 'message';
+  type: "entity" | "observation" | "reflection" | "relation" | "message";
   content: string;
   relevanceScore: number;
   metadata: Record<string, any>;
@@ -333,7 +351,7 @@ async function resolveSessionId(
 
     // If not found in session_map, try legacy sessions table
     const legacyResult = await pool.query(
-      'SELECT id FROM sessions WHERE external_id = $1',
+      "SELECT id FROM sessions WHERE external_id = $1",
       [input.session_id],
     );
     if (legacyResult.rows.length > 0) return legacyResult.rows[0].id;
@@ -343,7 +361,7 @@ async function resolveSessionId(
   // Auto-detect: try session_map first, then sessions
   try {
     const recent = await pool.query(
-      'SELECT id, opencode_session_id FROM session_map ORDER BY last_active_at DESC LIMIT 1',
+      "SELECT id, opencode_session_id FROM session_map ORDER BY last_active_at DESC LIMIT 1",
     );
     if (recent.rows.length > 0) {
       logger.info(
@@ -367,7 +385,7 @@ async function resolveSessionId(
   }
 
   throw new Error(
-    'No session found. Please start a conversation first or provide session_id explicitly.',
+    "No session found. Please start a conversation first or provide session_id explicitly.",
   );
 }
 
@@ -381,7 +399,7 @@ async function resolveExternalSessionId(
   // Try session_map
   try {
     const result = await pool.query(
-      'SELECT id FROM session_map WHERE opencode_session_id = $1',
+      "SELECT id FROM session_map WHERE opencode_session_id = $1",
       [externalId],
     );
     if (result.rows.length > 0) return result.rows[0].id;
@@ -391,7 +409,7 @@ async function resolveExternalSessionId(
 
   // Try legacy sessions
   const legacy = await pool.query(
-    'SELECT id FROM sessions WHERE external_id = $1',
+    "SELECT id FROM sessions WHERE external_id = $1",
     [externalId],
   );
   if (legacy.rows.length > 0) return legacy.rows[0].id;
@@ -414,23 +432,25 @@ async function resolveScopeToSessionIds(
   baseSessionMapId: string,
   scope: string,
 ): Promise<string[]> {
-  if (scope === 'session') {
+  if (scope === "session") {
     return [baseSessionMapId];
   }
 
-  if (scope === 'task') {
+  if (scope === "task") {
     try {
       const taskResult = await pool.query(
-        'SELECT omo_task_id FROM session_map WHERE id = $1',
+        "SELECT omo_task_id FROM session_map WHERE id = $1",
         [baseSessionMapId],
       );
       if (taskResult.rows.length === 0 || !taskResult.rows[0].omo_task_id) {
-        logger.warn('scope=task but omo_task_id is NULL, falling back to current session');
+        logger.warn(
+          "scope=task but omo_task_id is NULL, falling back to current session",
+        );
         return [baseSessionMapId];
       }
       const omoTaskId = taskResult.rows[0].omo_task_id;
       const sessionsResult = await pool.query(
-        'SELECT id FROM session_map WHERE omo_task_id = $1',
+        "SELECT id FROM session_map WHERE omo_task_id = $1",
         [omoTaskId],
       );
       const ids = sessionsResult.rows.map((r: any) => r.id);
@@ -440,18 +460,21 @@ async function resolveScopeToSessionIds(
     }
   }
 
-  if (scope === 'project') {
+  if (scope === "project") {
     try {
       const projectResult = await pool.query(
-        'SELECT project_id FROM session_map WHERE id = $1',
+        "SELECT project_id FROM session_map WHERE id = $1",
         [baseSessionMapId],
       );
-      if (projectResult.rows.length === 0 || !projectResult.rows[0].project_id) {
+      if (
+        projectResult.rows.length === 0 ||
+        !projectResult.rows[0].project_id
+      ) {
         return [baseSessionMapId];
       }
       const projectId = projectResult.rows[0].project_id;
       const sessionsResult = await pool.query(
-        'SELECT id FROM session_map WHERE project_id = $1',
+        "SELECT id FROM session_map WHERE project_id = $1",
         [projectId],
       );
       const ids = sessionsResult.rows.map((r: any) => r.id);
@@ -475,7 +498,7 @@ async function topicContextFusion(
   pool: Pool,
 ): Promise<{
   fusedEmbedding: number[];
-  contextUsed: NonNullable<RecallMemoryOutput['context_used']>;
+  contextUsed: NonNullable<RecallMemoryOutput["context_used"]>;
 } | null> {
   try {
     // Look up internal session ID
@@ -515,30 +538,38 @@ async function topicContextFusion(
       if (anyTopic.rows.length === 0) return null;
 
       const topicEmbedding = anyTopic.rows[0].embedding as number[];
-      const fusedEmbedding = fuseEmbeddings(queryEmbedding, topicEmbedding, TOPIC_FUSION_RATIO);
+      const fusedEmbedding = fuseEmbeddings(
+        queryEmbedding,
+        topicEmbedding,
+        TOPIC_FUSION_RATIO,
+      );
 
       return {
         fusedEmbedding,
         contextUsed: {
           topic_segment_id: anyTopic.rows[0].id,
-          topic_summary: anyTopic.rows[0].summary || 'No summary',
+          topic_summary: anyTopic.rows[0].summary || "No summary",
         },
       };
     }
 
     const topicEmbedding = topicResult.rows[0].embedding as number[];
-    const fusedEmbedding = fuseEmbeddings(queryEmbedding, topicEmbedding, TOPIC_FUSION_RATIO);
+    const fusedEmbedding = fuseEmbeddings(
+      queryEmbedding,
+      topicEmbedding,
+      TOPIC_FUSION_RATIO,
+    );
 
     return {
       fusedEmbedding,
       contextUsed: {
         topic_segment_id: topicResult.rows[0].id,
-        topic_summary: topicResult.rows[0].summary || 'No summary',
+        topic_summary: topicResult.rows[0].summary || "No summary",
       },
     };
   } catch (err) {
     // topic_segments table may not exist — skip fusion gracefully
-    logger.warn('Topic context fusion skipped:', err);
+    logger.warn("Topic context fusion skipped:", err);
     return null;
   }
 }
@@ -556,7 +587,8 @@ function fuseEmbeddings(
   const queryWeight = 1 - topicRatio;
 
   for (let i = 0; i < dim; i++) {
-    result[i] = queryWeight * (queryEmb[i] || 0) + topicRatio * (topicEmb[i] || 0);
+    result[i] =
+      queryWeight * (queryEmb[i] || 0) + topicRatio * (topicEmb[i] || 0);
   }
 
   return normalizeVector(result);
@@ -581,7 +613,7 @@ async function parallelRetrieve(
   sessionIds: string[],
   strategies: string[],
   pool: Pool,
-  filters?: RecallMemoryInput['filters'],
+  filters?: RecallMemoryInput["filters"],
 ): Promise<Map<string, InternalFact[]>> {
   const results = new Map<string, InternalFact[]>();
 
@@ -589,57 +621,68 @@ async function parallelRetrieve(
 
   const promises: Promise<void>[] = [];
 
-  if (strategies.includes('semantic')) {
+  if (strategies.includes("semantic")) {
     promises.push(
       (async () => {
         try {
-          const r = await semanticSearch(queryEmbedding, sessionIds, pool, filterSQL);
-          results.set('semantic', r);
+          const r = await semanticSearch(
+            queryEmbedding,
+            sessionIds,
+            pool,
+            filterSQL,
+          );
+          results.set("semantic", r);
         } catch (err) {
-          logger.warn('Semantic search failed:', err);
-          results.set('semantic', []);
+          logger.warn("Semantic search failed:", err);
+          results.set("semantic", []);
         }
       })(),
     );
   }
 
-  if (strategies.includes('bm25')) {
+  if (strategies.includes("bm25")) {
     promises.push(
       (async () => {
         try {
           const r = await bm25Search(query, sessionIds, pool, filterSQL);
-          results.set('bm25', r);
+          results.set("bm25", r);
         } catch (err) {
-          logger.warn('BM25 search failed:', err);
-          results.set('bm25', []);
+          logger.warn("BM25 search failed:", err);
+          results.set("bm25", []);
         }
       })(),
     );
   }
 
-  if (strategies.includes('graph')) {
+  if (strategies.includes("graph")) {
     promises.push(
       (async () => {
         try {
-          const r = await graphTraversal(query, embeddingServiceFallback(query), sessionIds, pool, filterSQL);
-          results.set('graph', r);
+          const r = await graphTraversal(
+            query,
+            embeddingServiceFallback(query),
+            sessionIds,
+            pool,
+            filterSQL,
+          );
+          results.set("graph", r);
         } catch (err) {
-          logger.warn('Graph traversal failed:', err);
-          results.set('graph', []);
+          logger.warn("Graph traversal failed:", err);
+          results.set("graph", []);
         }
       })(),
     );
   }
 
-  if (strategies.includes('keyword')) {
+  if (strategies.includes("keyword")) {
     promises.push(
       (async () => {
         try {
           const r = await keywordSearch(query, sessionIds, pool, filterSQL);
-          results.set('keyword', r);
+          results.set("keyword", r);
         } catch (err) {
-          logger.warn('Keyword search failed:', err);
-          results.set('keyword', []);
+          logger.warn("Keyword search failed:", err);
+          results.set("keyword", []);
         }
       })(),
     );
@@ -659,7 +702,7 @@ function embeddingServiceFallback(_query: string): number[] {
 // Filter builder
 // ============================================================
 
-function buildFilterConditions(filters?: RecallMemoryInput['filters']): {
+function buildFilterConditions(filters?: RecallMemoryInput["filters"]): {
   sql: string;
   params: any[];
 } {
@@ -676,7 +719,7 @@ function buildFilterConditions(filters?: RecallMemoryInput['filters']): {
   // Note: min_importance, tier, entity_types, exclude_topic_segment_ids are applied
   // in the post-retrieval applyFilters() step, not in SQL.
 
-  const sql = conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : '';
+  const sql = conditions.length > 0 ? `AND ${conditions.join(" AND ")}` : "";
   return { sql, params };
 }
 
@@ -717,8 +760,8 @@ async function semanticSearch(
     facts.push(
       ...entityResult.rows.map((row) => ({
         id: row.id,
-        type: 'entity' as const,
-        content: `[${(row.type || '').toUpperCase()}] ${row.name}: ${row.description || ''}`,
+        type: "entity" as const,
+        content: `[${(row.type || "").toUpperCase()}] ${row.name}: ${row.description || ""}`,
         relevanceScore: row.similarity ?? 0,
         tokens: 0,
         metadata: {
@@ -727,7 +770,7 @@ async function semanticSearch(
           confidence: row.confidence,
           createdAt: row.created_at,
           tier: row.tier,
-          source: 'semantic',
+          source: "semantic",
         },
         _sessionId: row.session_map_id || row.session_id,
         _topicSegmentId: row.topic_segment_id,
@@ -735,7 +778,7 @@ async function semanticSearch(
       })),
     );
   } catch (err) {
-    logger.warn('Entity semantic search error:', err);
+    logger.warn("Entity semantic search error:", err);
   }
 
   // ── 2. Observations ──
@@ -757,15 +800,15 @@ async function semanticSearch(
     facts.push(
       ...obsResult.rows.map((row) => ({
         id: row.id,
-        type: 'observation' as const,
-        content: `[${row.tool_name || 'Observation'}] ${row.content || ''}`,
+        type: "observation" as const,
+        content: `[${row.tool_name || "Observation"}] ${row.content || ""}`,
         relevanceScore: row.similarity ?? 0,
         tokens: 0,
         metadata: {
           toolName: row.tool_name,
           importance: row.importance,
           createdAt: row.created_at,
-          source: 'semantic',
+          source: "semantic",
         },
         _sessionId: row.session_map_id || row.session_id,
         _topicSegmentId: row.topic_segment_id,
@@ -773,7 +816,7 @@ async function semanticSearch(
       })),
     );
   } catch (err) {
-    logger.warn('Observation semantic search error:', err);
+    logger.warn("Observation semantic search error:", err);
   }
 
   // ── 3. Reflections ──
@@ -795,15 +838,15 @@ async function semanticSearch(
     facts.push(
       ...refResult.rows.map((row) => ({
         id: row.id,
-        type: 'reflection' as const,
-        content: `[Reflection${row.pattern_type ? ` - ${row.pattern_type}` : ''}] ${row.content || ''}`,
+        type: "reflection" as const,
+        content: `[Reflection${row.pattern_type ? ` - ${row.pattern_type}` : ""}] ${row.content || ""}`,
         relevanceScore: row.similarity ?? 0,
         tokens: 0,
         metadata: {
           patternType: row.pattern_type,
           confidence: row.confidence,
           createdAt: row.created_at,
-          source: 'semantic',
+          source: "semantic",
         },
         _sessionId: row.session_map_id || row.session_id,
         _topicSegmentId: row.topic_segment_id,
@@ -811,7 +854,7 @@ async function semanticSearch(
       })),
     );
   } catch (err) {
-    logger.warn('Reflection semantic search error:', err);
+    logger.warn("Reflection semantic search error:", err);
   }
 
   return facts;
@@ -853,8 +896,8 @@ async function bm25Search(
     facts.push(
       ...entityResult.rows.map((row) => ({
         id: row.id,
-        type: 'entity' as const,
-        content: `[${(row.type || '').toUpperCase()}] ${row.name}: ${row.description || ''}`,
+        type: "entity" as const,
+        content: `[${(row.type || "").toUpperCase()}] ${row.name}: ${row.description || ""}`,
         relevanceScore: row.bm25_score ?? 0,
         tokens: 0,
         metadata: {
@@ -863,7 +906,7 @@ async function bm25Search(
           confidence: row.confidence,
           createdAt: row.created_at,
           tier: row.tier,
-          source: 'bm25',
+          source: "bm25",
         },
         _sessionId: row.session_map_id || row.session_id,
         _topicSegmentId: row.topic_segment_id,
@@ -871,7 +914,7 @@ async function bm25Search(
       })),
     );
   } catch (err) {
-    logger.warn('BM25 search failed (pg_trgm may not be installed):', err);
+    logger.warn("BM25 search failed (pg_trgm may not be installed):", err);
   }
 
   return facts;
@@ -933,8 +976,8 @@ async function graphTraversal(
     const graphResult = await pool.query(graphQuery, [seedIds, 0.5]);
     return graphResult.rows.map((row) => ({
       id: row.id,
-      type: 'entity' as const,
-      content: `[${(row.type || '').toUpperCase()}] ${row.name}: ${row.description || ''} (related to ${row.related_entity_name} via ${row.relation_type})`,
+      type: "entity" as const,
+      content: `[${(row.type || "").toUpperCase()}] ${row.name}: ${row.description || ""} (related to ${row.related_entity_name} via ${row.relation_type})`,
       relevanceScore: (row.confidence ?? 0) * 0.8,
       tokens: 0,
       metadata: {
@@ -945,14 +988,14 @@ async function graphTraversal(
         tier: row.tier,
         relationType: row.relation_type,
         relatedEntity: row.related_entity_name,
-        source: 'graph',
+        source: "graph",
       },
       _sessionId: row.session_map_id || row.session_id,
       _topicSegmentId: row.topic_segment_id,
       _timestamp: row.created_at,
     }));
   } catch (err) {
-    logger.warn('Graph traversal error:', err);
+    logger.warn("Graph traversal error:", err);
     return [];
   }
 }
@@ -970,7 +1013,7 @@ async function keywordSearch(
   const keywords = query.split(/\s+/).filter((k) => k.length > 2);
   if (keywords.length === 0) return [];
 
-  const pattern = keywords.join('|');
+  const pattern = keywords.join("|");
 
   try {
     const entityQuery = `
@@ -983,27 +1026,74 @@ async function keywordSearch(
         ${filters.sql}
       LIMIT ${PER_STRATEGY_LIMIT}
     `;
-    const entityResult = await pool.query(entityQuery, [sessionIds, pattern, ...filters.params]);
-    return entityResult.rows.map((row) => ({
-      id: row.id,
-      type: 'entity' as const,
-      content: `[${(row.type || '').toUpperCase()}] ${row.name}: ${row.description || ''}`,
-      relevanceScore: 0.6,
-      tokens: 0,
-      metadata: {
-        entityType: row.type,
-        weight: row.weight,
-        confidence: row.confidence,
-        createdAt: row.created_at,
-        tier: row.tier,
-        source: 'keyword',
-      },
-      _sessionId: row.session_map_id || row.session_id,
-      _topicSegmentId: row.topic_segment_id,
-      _timestamp: row.created_at,
-    }));
+    const entityResult = await pool.query(entityQuery, [
+      sessionIds,
+      pattern,
+      ...filters.params,
+    ]);
+
+    // Batch fetch relations for all matched entities: file→symbols and symbols→file
+    const entityIds = entityResult.rows.map((r: any) => r.id);
+    const relationsByEntity = new Map<string, string[]>();
+    if (entityIds.length > 0) {
+      const relResult = await pool.query(
+        `SELECT re.source_entity_id, re.target_entity_id, re.relation_type,
+                e_source.name as source_name, e_target.name as target_name,
+                e_source.type as source_type, e_target.type as target_type
+         FROM relations re
+         JOIN entities e_source ON re.source_entity_id = e_source.id
+         JOIN entities e_target ON re.target_entity_id = e_target.id
+         WHERE (re.source_entity_id = ANY($1::uuid[]) OR re.target_entity_id = ANY($1::uuid[]))
+           AND re.relation_type = 'references'
+         LIMIT 100`,
+        [entityIds],
+      );
+      for (const row of relResult.rows) {
+        // File → symbols: key by source (file)
+        if (!relationsByEntity.has(row.source_entity_id)) {
+          relationsByEntity.set(row.source_entity_id, []);
+        }
+        relationsByEntity
+          .get(row.source_entity_id)!
+          .push(`${row.target_name} (${row.target_type})`);
+        // Symbols → file: key by target (symbol)
+        if (!relationsByEntity.has(row.target_entity_id)) {
+          relationsByEntity.set(row.target_entity_id, []);
+        }
+        relationsByEntity
+          .get(row.target_entity_id)!
+          .push(`in: ${row.source_name}`);
+      }
+    }
+
+    return entityResult.rows.map((row) => {
+      const related = relationsByEntity.get(row.id);
+      let content = `[${(row.type || "").toUpperCase()}] ${row.name}: ${row.description || ""}`;
+      if (related && related.length > 0) {
+        content += ` | ${related.slice(0, 5).join(", ")}`;
+      }
+      return {
+        id: row.id,
+        type: "entity" as const,
+        content,
+        relevanceScore: 0.6,
+        tokens: 0,
+        metadata: {
+          entityType: row.type,
+          weight: row.weight,
+          confidence: row.confidence,
+          createdAt: row.created_at,
+          tier: row.tier,
+          source: "keyword",
+          related: related?.slice(0, 10),
+        },
+        _sessionId: row.session_map_id || row.session_id,
+        _topicSegmentId: row.topic_segment_id,
+        _timestamp: row.created_at,
+      };
+    });
   } catch (err) {
-    logger.warn('Keyword search error:', err);
+    logger.warn("Keyword search error:", err);
     return [];
   }
 }
@@ -1020,14 +1110,14 @@ function mergeAndDeduplicate(
 
   for (const [, facts] of strategyResults) {
     for (const fact of facts) {
-      const key = `${fact.type}:${fact.id || fact.metadata.id || ''}`;
+      const key = `${fact.type}:${fact.id || fact.metadata.id || ""}`;
       if (!seen.has(key)) {
         seen.add(key);
         merged.push(fact);
       } else {
         // Keep highest score
         const existing = merged.find(
-          (f) => `${f.type}:${f.id || f.metadata.id || ''}` === key,
+          (f) => `${f.type}:${f.id || f.metadata.id || ""}` === key,
         );
         if (existing && fact.relevanceScore > existing.relevanceScore) {
           existing.relevanceScore = fact.relevanceScore;
@@ -1056,8 +1146,11 @@ function calculateMultiDimensionalScores(
       const semanticScore = fact.relevanceScore;
 
       // Recency decay
-      const createdAt = new Date(fact.metadata.createdAt || fact._timestamp || Date.now());
-      const daysAgo = (now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24);
+      const createdAt = new Date(
+        fact.metadata.createdAt || fact._timestamp || Date.now(),
+      );
+      const daysAgo =
+        (now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24);
       const recencyScore = 1.0 / (1 + daysAgo);
 
       // Importance (normalize to 0-1)
@@ -1075,16 +1168,21 @@ function calculateMultiDimensionalScores(
       if (decayConfig.enabled) {
         const metadata = fact.metadata || {};
         const lastSeen = metadata.createdAt || fact._timestamp || Date.now();
-        const daysSinceLastSeen = (Date.now() - new Date(lastSeen).getTime()) / 86400000;
+        const daysSinceLastSeen =
+          (Date.now() - new Date(lastSeen).getTime()) / 86400000;
 
         // Skip decay for permanent tier
-        if (metadata.tier !== 'permanent') {
+        if (metadata.tier !== "permanent") {
           // Apply exponential decay to relevanceScore
-          const decayedWeight = relevanceScore * Math.pow(decayConfig.factor, daysSinceLastSeen);
+          const decayedWeight =
+            relevanceScore * Math.pow(decayConfig.factor, daysSinceLastSeen);
           relevanceScore = Math.max(0.01, decayedWeight);
 
           // Mark old, low-value results for filtering
-          if (daysSinceLastSeen > decayConfig.maxAgeDays && relevanceScore < 0.1) {
+          if (
+            daysSinceLastSeen > decayConfig.maxAgeDays &&
+            relevanceScore < 0.1
+          ) {
             relevanceScore = 0;
           }
         }
@@ -1107,7 +1205,7 @@ function calculateMultiDimensionalScores(
 
 function applyFilters(
   facts: InternalFact[],
-  filters?: RecallMemoryInput['filters'],
+  filters?: RecallMemoryInput["filters"],
 ): InternalFact[] {
   if (!filters) return facts;
 
@@ -1125,13 +1223,15 @@ function applyFilters(
     // min_confidence
     if (filters.min_confidence !== undefined) {
       const conf = fact.metadata.confidence;
-      if (conf !== undefined && conf !== null && conf < filters.min_confidence) return false;
+      if (conf !== undefined && conf !== null && conf < filters.min_confidence)
+        return false;
     }
 
     // min_importance
     if (filters.min_importance !== undefined) {
       const imp = fact.metadata.importance;
-      if (imp !== undefined && imp !== null && imp < filters.min_importance) return false;
+      if (imp !== undefined && imp !== null && imp < filters.min_importance)
+        return false;
     }
 
     // tier filter (single + array backward compat)
@@ -1147,7 +1247,10 @@ function applyFilters(
     }
 
     // exclude_topic_segment_ids
-    if (filters.exclude_topic_segment_ids && filters.exclude_topic_segment_ids.length > 0) {
+    if (
+      filters.exclude_topic_segment_ids &&
+      filters.exclude_topic_segment_ids.length > 0
+    ) {
       if (
         fact._topicSegmentId &&
         filters.exclude_topic_segment_ids.includes(fact._topicSegmentId)
@@ -1179,43 +1282,50 @@ function applyFilters(
  * that share the same tool_name and completed status into single summary entries.
  * Only affects observation-type facts.
  */
-export function aggregateConsecutiveSimilar(facts: InternalFact[]): InternalFact[] {
+export function aggregateConsecutiveSimilar(
+  facts: InternalFact[],
+): InternalFact[] {
   if (facts.length === 0) return facts;
-  
+
   const result: InternalFact[] = [];
   let i = 0;
-  
+
   while (i < facts.length) {
     const current = facts[i];
-    
+
     // Only aggregate observation-type, completed tool calls
-    if (current.type === 'observation' && 
-        current.metadata?.source && 
-        current.metadata?.toolName &&
-        current.content) {
-      
+    if (
+      current.type === "observation" &&
+      current.metadata?.source &&
+      current.metadata?.toolName &&
+      current.content
+    ) {
       const toolName = current.metadata.toolName;
-      
+
       // Count consecutive same-tool observations
       let j = i + 1;
-      while (j < facts.length &&
-             facts[j].type === 'observation' &&
-             facts[j].metadata?.toolName === toolName) {
+      while (
+        j < facts.length &&
+        facts[j].type === "observation" &&
+        facts[j].metadata?.toolName === toolName
+      ) {
         j++;
       }
-      
+
       const count = j - i;
-      
+
       if (count >= 2) {
         // Merge: keep the last (most recent) item, update its content
         const last = facts[j - 1];
-        const firstContent = current.content.length > 80 
-          ? current.content.substring(0, 80) + '...' 
-          : current.content;
-        const lastContent = last.content.length > 80 
-          ? last.content.substring(0, 80) + '...' 
-          : last.content;
-        
+        const firstContent =
+          current.content.length > 80
+            ? current.content.substring(0, 80) + "..."
+            : current.content;
+        const lastContent =
+          last.content.length > 80
+            ? last.content.substring(0, 80) + "..."
+            : last.content;
+
         result.push({
           ...last,
           content: `[${toolName} ×${count}] ${lastContent}`,
@@ -1227,17 +1337,17 @@ export function aggregateConsecutiveSimilar(facts: InternalFact[]): InternalFact
             aggregateRange: `${firstContent} ... ${lastContent}`,
           },
         });
-        
+
         i = j; // Skip all merged items
         continue;
       }
     }
-    
+
     // No aggregation: keep as-is
     result.push(current);
     i++;
   }
-  
+
   return result;
 }
 
@@ -1263,7 +1373,8 @@ async function crossEncoderRerank(
       }
     }
 
-    const overlapScore = queryWords.length > 0 ? overlap / queryWords.length : 0;
+    const overlapScore =
+      queryWords.length > 0 ? overlap / queryWords.length : 0;
     const adjustedScore = fact.relevanceScore * 0.7 + overlapScore * 0.3;
 
     return {
@@ -1306,7 +1417,8 @@ async function enrichWithContext(
     if (fact._sessionId && sessionMap.has(fact._sessionId)) {
       const s = sessionMap.get(fact._sessionId)!;
       fact._omoTaskId = fact._omoTaskId || s.omo_task_id;
-      if (!fact._sessionId) fact._sessionId = s.opencode_session_id || fact._sessionId;
+      if (!fact._sessionId)
+        fact._sessionId = s.opencode_session_id || fact._sessionId;
     }
 
     if (fact._topicSegmentId && topicMap.has(fact._topicSegmentId)) {
@@ -1326,8 +1438,13 @@ async function enrichWithContext(
 async function lookupSessions(
   ids: string[],
   pool: Pool,
-): Promise<Map<string, { opencode_session_id?: string; omo_task_id?: string }>> {
-  const map = new Map<string, { opencode_session_id?: string; omo_task_id?: string }>();
+): Promise<
+  Map<string, { opencode_session_id?: string; omo_task_id?: string }>
+> {
+  const map = new Map<
+    string,
+    { opencode_session_id?: string; omo_task_id?: string }
+  >();
   if (ids.length === 0) return map;
 
   try {
@@ -1386,10 +1503,10 @@ async function lookupTopics(
 // ============================================================
 
 function mapType(
-  type: 'entity' | 'observation' | 'reflection' | 'relation' | 'message',
-): 'entity' | 'observation' | 'reflection' | 'relation' {
-  if (type === 'message') return 'observation'; // legacy messages → observation
-  if (type === 'relation') return 'relation';
+  type: "entity" | "observation" | "reflection" | "relation" | "message",
+): "entity" | "observation" | "reflection" | "relation" {
+  if (type === "message") return "observation"; // legacy messages → observation
+  if (type === "relation") return "relation";
   return type;
 }
 
@@ -1411,5 +1528,5 @@ function buildDataPayload(fact: InternalFact): Record<string, any> {
 
 /** Format a number[] as a pgvector literal string: '[0.1,0.2,...]' */
 function formatVectorLiteral(embedding: number[]): string {
-  return `[${embedding.join(',')}]`;
+  return `[${embedding.join(",")}]`;
 }

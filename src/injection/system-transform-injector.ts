@@ -241,32 +241,40 @@ async function fetchActiveRules(pool: Pool): Promise<ActiveRule[]> {
 // ============================================================
 
 /**
- * 查询项目骨架：weight 最高的 N 个文件实体，用于注入到 Agent 上下文。
- * 让 Agent 无需探索即可了解项目结构。
+ * 查询项目骨架：逐文件追加，token 预算感知，永不截断文件名。
+ * 目标 token 预算 150（约 600 chars 英文），防止挤占核心记忆。
  */
 async function getProjectSkeleton(
   projectId: string,
   pool: Pool,
-  limit = 7,
+  maxTokens = 150,
 ): Promise<string | null> {
   try {
     const { rows } = await pool.query(
-      `SELECT e.name, e.weight, e.last_seen_at
+      `SELECT e.name, e.weight
        FROM entities e
        JOIN session_map sm ON e.session_map_id = sm.id
        WHERE sm.project_id = $1
          AND e.type = 'file'
          AND e.last_seen_at > NOW() - INTERVAL '14 days'
-       ORDER BY e.weight DESC, e.last_seen_at DESC
-       LIMIT $2`,
-      [projectId, limit],
+       ORDER BY e.weight DESC, e.last_seen_at DESC`,
+      [projectId],
     );
     if (rows.length === 0) return null;
 
-    const files = rows
-      .map((r: any) => `${r.name} (${Math.round(r.weight)}×)`)
-      .join(", ");
-    return `top files: ${files}`;
+    let skeleton = "top files: ";
+    let budget = estimateTokens(skeleton);
+
+    for (const row of rows) {
+      const entry = `${row.name} (${Math.round(row.weight)}×)`;
+      const cost = estimateTokens(entry + ", ");
+      if (budget + cost > maxTokens) break;
+      skeleton +=
+        (budget === estimateTokens("top files: ") ? "" : ", ") + entry;
+      budget += cost;
+    }
+
+    return skeleton === "top files: " ? null : skeleton;
   } catch (err) {
     logger.warn("Failed to fetch project skeleton:", err);
     return null;

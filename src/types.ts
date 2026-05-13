@@ -500,7 +500,7 @@ export interface HindsightReflectInput {
   session_id?: string;
   omo_task_id?: string;
   topic_segment_id?: string;
-  trigger_type?: "threshold" | "scheduled" | "manual";
+  trigger_type?: "threshold" | "scheduled" | "manual" | "auto";
   observation_threshold?: number;
   model_size?: "7b" | "14b" | "full";
   aggregate?: boolean;

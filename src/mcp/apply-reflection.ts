@@ -83,6 +83,13 @@ async function appendRuleToRulesMd(
   const content = await readRulesMd(path);
   const normalized = content.endsWith("\n") ? content : content + "\n";
 
+  // ── 去重：检查相同规则是否已存在（用首行 When 语句做 key）──
+  const whenLine = ruleBullet.split("\n")[0]?.trim();
+  if (whenLine && normalized.includes(whenLine)) {
+    logger.info("Rule already exists in rules.md, skipping dedup append");
+    return;
+  }
+
   const sectionStart = normalized.indexOf(AUTO_SECTION_HEADER);
   let newContent: string;
 
@@ -178,6 +185,27 @@ export async function applyReflection(
         summary: row.summary,
         error: "Already applied",
       };
+    }
+
+    // 2b. 7 天冷却期：同类 pattern 刚应用过则跳过
+    if (row.pattern_type) {
+      const cooldownCheck = await pool.query(
+        `SELECT COUNT(*) as cnt FROM reflections
+         WHERE pattern_type = $1
+           AND applied_at IS NOT NULL
+           AND applied_at > NOW() - INTERVAL '7 days'`,
+        [row.pattern_type],
+      );
+      if (parseInt(cooldownCheck.rows[0].cnt, 10) > 0) {
+        return {
+          success: true,
+          applied: false,
+          pattern_type: row.pattern_type,
+          summary: row.summary,
+          error:
+            "Cooldown active — same pattern_type was applied within 7 days",
+        };
+      }
     }
 
     // 3. 检查是否有 action_plan

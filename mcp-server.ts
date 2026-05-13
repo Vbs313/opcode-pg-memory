@@ -32,6 +32,7 @@ import {
   applyReflection,
   ApplyReflectionInput,
 } from "./src/mcp/apply-reflection";
+import { reviewRules, ReviewRulesInput } from "./src/mcp/review-rules";
 import { getMemory, GetMemoryInput } from "./src/mcp/get-memory";
 import { getTimeline, TimelineInput } from "./src/mcp/timeline";
 import { deleteMemory, DeleteMemoryInput } from "./src/mcp/delete-memory";
@@ -455,7 +456,7 @@ const TOOLS: Tool[] = [
   {
     name: "apply_reflection",
     description:
-      "将 hindsight_reflect 产出的可执行模式写入 rules.md，使 Agent 自动遵守。接收 pattern_id，检查 action_plan，追加到 ~/.config/opencode/rules.md，标记 applied_at。幂等操作。",
+      "将 hindsight_reflect 产出的可执行模式写入 rules.md，使 Agent 自动遵守。接收 pattern_id，检查 action_plan，追加到 ~/.config/opencode/rules.md，标记 applied_at。幂等操作，同类 pattern 7 天冷却期。",
     inputSchema: {
       type: "object",
       properties: {
@@ -466,6 +467,30 @@ const TOOLS: Tool[] = [
         },
       },
       required: ["pattern_id"],
+    },
+  },
+  {
+    name: "review_rules",
+    description:
+      "列出所有已应用的规则及其有效性（应用后的错误计数）。支持按 pattern_type 过滤。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pattern_type: {
+          type: "string",
+          description:
+            "可选：按模式类型过滤（error_pattern, workflow, tool_preference 等）",
+        },
+        include_archived: {
+          type: "boolean",
+          description: "是否包含 90 天前的归档规则",
+        },
+        limit: {
+          type: "number",
+          default: 50,
+          description: "返回上限",
+        },
+      },
     },
   },
 ];
@@ -834,6 +859,13 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
       args as unknown as ApplyReflectionInput,
       pool,
     );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  },
+
+  review_rules: async (args, pool) => {
+    const result = await reviewRules(args as unknown as ReviewRulesInput, pool);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
