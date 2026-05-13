@@ -29,6 +29,8 @@ export class DatabaseInitializer {
   private logger = createLogger("init-db");
   /** 从运行配置读取的向量维度，默认 1024 匹配 qwen3-embedding */
   private embeddingDim: number;
+  /** pgvector 扩展是否可用。不可用时跳过所有 vector 列和 HNSW 索引 */
+  private vectorAvailable = false;
 
   constructor(config: Partial<DatabaseConfig> = {}) {
     this.config = { ...DEFAULT_DB_CONFIG, ...config };
@@ -50,9 +52,16 @@ export class DatabaseInitializer {
       max: this.config.maxConnections,
     });
 
-    // 注册 pgvector 类型
-    // @ts-ignore - pgvector types may vary
-    pgvector.registerTypes?.(this.pool);
+    // 注册 pgvector 类型（如果扩展不可用则跳过）
+    try {
+      // @ts-ignore - pgvector types may vary
+      pgvector.registerTypes?.(this.pool);
+    } catch {
+      this.logger.warn(
+        "pgvector type registration failed — vector columns disabled",
+      );
+      this.vectorAvailable = false;
+    }
 
     // 测试连接
     await this.testConnection();
@@ -119,11 +128,21 @@ export class DatabaseInitializer {
   }
 
   private async createExtensions(client: PoolClient): Promise<void> {
-    await client.query(`
-      CREATE EXTENSION IF NOT EXISTS vector;
-      CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-    `);
-    this.logger.info("Extensions created");
+    // uuid-ossp 是 PostgreSQL 内置扩展，通常可用
+    await client.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`);
+
+    // pgvector 可能未安装 — 单独 catch，降级而非崩溃
+    try {
+      await client.query(`CREATE EXTENSION IF NOT EXISTS vector`);
+      this.vectorAvailable = true;
+      this.logger.info("pgvector extension available — enabling vector search");
+    } catch {
+      this.vectorAvailable = false;
+      this.logger.warn(
+        "pgvector extension NOT available — vector search disabled. " +
+          "Install pgvector (https://github.com/pgvector/pgvector) for semantic search.",
+      );
+    }
   }
 
   private async createEnums(client: PoolClient): Promise<void> {
@@ -143,6 +162,9 @@ export class DatabaseInitializer {
   }
 
   private async createTables(client: PoolClient): Promise<void> {
+    // vector 不可用时跳过所有 embedding 列定义
+    const emb = (col = "embedding") =>
+      this.vectorAvailable ? `${col} vector(${this.embeddingDim}),` : "";
     // ── session_map 表（替代旧 sessions 表，旧表保留为历史数据） ──
     await client.query(`
       CREATE TABLE IF NOT EXISTS session_map (
@@ -164,7 +186,7 @@ export class DatabaseInitializer {
         session_map_id UUID NOT NULL REFERENCES session_map(id) ON DELETE CASCADE,
         segment_index INTEGER NOT NULL,
         summary TEXT,
-        embedding vector(${this.embeddingDim}),
+        ${emb()}
         start_message_external_id VARCHAR(255),
         end_message_external_id VARCHAR(255),
         created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -186,7 +208,7 @@ export class DatabaseInitializer {
         tier entity_tier DEFAULT 'session',
         weight FLOAT DEFAULT 1.0 CHECK (weight >= 0 AND weight <= 10),
         description TEXT,
-        embedding vector(${this.embeddingDim}),
+        ${emb()}
         first_seen_at TIMESTAMPTZ DEFAULT NOW(),
         last_seen_at TIMESTAMPTZ DEFAULT NOW(),
         confidence FLOAT DEFAULT 0.8 CHECK (confidence >= 0 AND confidence <= 1),
@@ -222,7 +244,7 @@ export class DatabaseInitializer {
         learned TEXT,
         completed TEXT,
         next_steps TEXT,
-        summary_embedding vector(${this.embeddingDim}),
+        ${emb("summary_embedding")}
         token_count INTEGER DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -246,7 +268,7 @@ export class DatabaseInitializer {
         tool_name VARCHAR(255),
         tool_input_summary TEXT,
         tool_output_summary TEXT,
-        embedding vector(${this.embeddingDim}),
+        ${emb()}
         importance INTEGER DEFAULT 3 CHECK (importance >= 1 AND importance <= 5),
         created_at TIMESTAMPTZ DEFAULT NOW(),
         message_id VARCHAR(255),
@@ -272,7 +294,7 @@ export class DatabaseInitializer {
         confidence FLOAT DEFAULT 0.8 CHECK (confidence >= 0 AND confidence <= 1),
         pattern_type VARCHAR(100),
         created_at TIMESTAMPTZ DEFAULT NOW(),
-        embedding vector(${this.embeddingDim}),
+        ${emb()}
         metadata JSONB DEFAULT '{}'
       );
     `);
@@ -296,7 +318,7 @@ export class DatabaseInitializer {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         query_hash VARCHAR(64) UNIQUE NOT NULL,
         query_text TEXT NOT NULL,
-        query_embedding vector(${this.embeddingDim}) NOT NULL,
+        ${this.vectorAvailable ? `query_embedding vector(${this.embeddingDim}) NOT NULL,` : ""}
         response_text TEXT NOT NULL,
         hit_count INTEGER DEFAULT 1,
         last_hit_at TIMESTAMPTZ DEFAULT NOW(),
@@ -368,12 +390,14 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_topic_segments_session ON topic_segments(session_map_id);
     `);
 
-    // HNSW 索引 for topic_segments
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_topic_segments_embedding ON topic_segments 
-      USING hnsw (embedding vector_cosine_ops)
-      WITH (m = 16, ef_construction = 64);
-    `);
+    // HNSW 索引 for topic_segments (仅 pgvector 可用时)
+    if (this.vectorAvailable) {
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_topic_segments_embedding ON topic_segments 
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+      `);
+    }
 
     // ── entities 表索引 ──
     await client.query(`
@@ -383,12 +407,14 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_entities_topic_segment ON entities(topic_segment_id);
     `);
 
-    // HNSW 索引 for entities
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities 
-      USING hnsw (embedding vector_cosine_ops)
-      WITH (m = 16, ef_construction = 64);
-    `);
+    // HNSW 索引 for entities (仅 pgvector 可用时)
+    if (this.vectorAvailable) {
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities 
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+      `);
+    }
 
     // ── relations 表索引 ──
     await client.query(`
@@ -405,7 +431,6 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_observations_importance ON observations(importance DESC);
       CREATE INDEX IF NOT EXISTS idx_observations_created_at ON observations(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_observations_topic_segment ON observations(topic_segment_id);
-      CREATE INDEX IF NOT EXISTS idx_observations_tier ON observations(tier) WHERE tier IN ('hot', 'warm');
     `);
 
     // 查找索引 for observations.source + platform_source
@@ -416,12 +441,14 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_observations_platform_source ON observations(platform_source);
     `);
 
-    // HNSW 索引 for observations
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_observations_embedding ON observations 
-      USING hnsw (embedding vector_cosine_ops)
-      WITH (m = 16, ef_construction = 64);
-    `);
+    // HNSW 索引 for observations (仅 pgvector 可用时)
+    if (this.vectorAvailable) {
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_observations_embedding ON observations 
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+      `);
+    }
 
     // ── reflections 表索引 ──
     await client.query(`
@@ -429,15 +456,16 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_reflections_pattern ON reflections(pattern_type);
       CREATE INDEX IF NOT EXISTS idx_reflections_confidence ON reflections(confidence) WHERE confidence >= 0.6;
       CREATE INDEX IF NOT EXISTS idx_reflections_topic_segment ON reflections(topic_segment_id);
-      CREATE INDEX IF NOT EXISTS idx_reflections_applied ON reflections(applied_at) WHERE applied_at IS NOT NULL;
     `);
 
-    // HNSW 索引 for reflections
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_reflections_embedding ON reflections 
-      USING hnsw (embedding vector_cosine_ops)
-      WITH (m = 16, ef_construction = 64);
-    `);
+    // HNSW 索引 for reflections (仅 pgvector 可用时)
+    if (this.vectorAvailable) {
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_reflections_embedding ON reflections 
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+      `);
+    }
 
     // ── reflection_errors 表索引 ──
     await client.query(`
@@ -445,7 +473,7 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_reflection_errors_created_at ON reflection_errors(created_at DESC);
     `);
 
-    // ── semantic_cache 表索引 ──
+    // ── semantic_cache 表索引 (不含 HNSW — 见下方条件) ──
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_semantic_cache_hash ON semantic_cache(query_hash);
       CREATE INDEX IF NOT EXISTS idx_semantic_cache_hit_count ON semantic_cache(hit_count DESC);
@@ -455,12 +483,14 @@ export class DatabaseInitializer {
       CREATE INDEX IF NOT EXISTS idx_semantic_cache_topic_segment ON semantic_cache(topic_segment_id);
     `);
 
-    // HNSW 索引 for semantic_cache
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_semantic_cache_embedding ON semantic_cache 
-      USING hnsw (query_embedding vector_cosine_ops)
-      WITH (m = 16, ef_construction = 64);
-    `);
+    // HNSW 索引 for semantic_cache (仅 pgvector 可用时)
+    if (this.vectorAvailable) {
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_semantic_cache_embedding ON semantic_cache 
+        USING hnsw (query_embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+      `);
+    }
 
     // ── token_usage_log 表索引 ──
     await client.query(`
@@ -653,6 +683,11 @@ export class DatabaseInitializer {
         } catch {
           // PG < 9.2 不支持 IF NOT EXISTS for constraints — 跳过
         }
+        // 列存在后才创建索引（避免 createIndexes 阶段因列缺失失败）
+        await client.query(`
+          CREATE INDEX IF NOT EXISTS idx_observations_tier
+          ON observations(tier) WHERE tier IN ('hot', 'warm')
+        `);
         await client.query("RELEASE SAVEPOINT migrate_v39_obs");
         this.logger.info("observations.tier column added");
       } catch (err) {
@@ -674,6 +709,11 @@ export class DatabaseInitializer {
           ALTER TABLE reflections
           ADD COLUMN IF NOT EXISTS action_plan JSONB DEFAULT NULL,
           ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ DEFAULT NULL
+        `);
+        // 列存在后才创建索引
+        await client.query(`
+          CREATE INDEX IF NOT EXISTS idx_reflections_applied
+          ON reflections(applied_at) WHERE applied_at IS NOT NULL
         `);
         await client.query("RELEASE SAVEPOINT migrate_v39_ref");
         this.logger.info("reflections.action_plan + applied_at columns added");
