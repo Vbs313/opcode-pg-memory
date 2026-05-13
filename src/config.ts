@@ -68,14 +68,6 @@ export function getConfig(): PgMemoryConfig {
   return _config;
 }
 
-export function buildConfig(): PgMemoryConfig {
-  return getConfig();
-}
-
-export function reloadConfig(): void {
-  _config = null;
-}
-
 export function getDatabaseConfig() {
   const cfg = getConfig();
   return {
@@ -84,16 +76,6 @@ export function getDatabaseConfig() {
     database: cfg.pgDatabase,
     user: cfg.pgUser,
     password: cfg.pgPassword,
-  };
-}
-
-export function getEmbeddingConfig() {
-  const cfg = getConfig();
-  return {
-    provider: cfg.embeddingProvider,
-    model: cfg.embeddingModel,
-    dimensions: cfg.embeddingDimensions,
-    batchSize: cfg.embeddingBatchSize,
   };
 }
 
