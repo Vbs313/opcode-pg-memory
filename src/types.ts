@@ -3,6 +3,47 @@
 // SDK types used for OpenCode primitives (no more OpenCodeSession/OpenCodeMessage/OpenCodeMessagePart)
 
 // ============================================================
+// Metadata types (replace Record<string, any>)
+// ============================================================
+
+export interface EntityMetadata {
+  source?: string;
+  [key: string]: unknown;
+}
+
+export interface ObservationMetadata {
+  event?: string;
+  parameters?: unknown;
+  tool_call_id?: string;
+  message_external_id?: string;
+  [key: string]: unknown;
+}
+
+export interface ReflectionMetadata {
+  applicability?: string;
+  generatedAt?: string;
+  modelSize?: string;
+  observationCount?: number;
+  topicSummary?: string;
+  triggerType?: string;
+  isAggregate?: boolean;
+  [key: string]: unknown;
+}
+
+export interface SessionMapMetadata {
+  reflected?: boolean;
+  pendingReflection?: unknown;
+  lastSessionSummary?: string;
+  messageCount?: number;
+  durationMs?: number;
+  reflectionTriggered?: boolean;
+  autoReflected?: boolean;
+  reflectionCount?: number;
+  autoApplied?: number;
+  [key: string]: unknown;
+}
+
+// ============================================================
 // Type aliases
 // ============================================================
 
@@ -34,7 +75,7 @@ export interface PluginEvent {
   timestamp: number;
   version: number;
   source: "hook" | "poll";
-  data: Record<string, any>;
+  data: Record<string, any>; // 事件属性由 OpenCode 定义，类型灵活
 }
 
 export interface VersionedRow {
@@ -59,7 +100,7 @@ export interface Entity {
   first_seen_at: Date;
   last_seen_at: Date;
   confidence: number;
-  metadata: Record<string, any>;
+  metadata: EntityMetadata;
 }
 
 export interface Relation {
@@ -85,7 +126,7 @@ export interface Observation {
   importance: number;
   created_at: Date;
   message_id?: string;
-  metadata: Record<string, any>;
+  metadata: ObservationMetadata;
 }
 
 export interface Reflection {
@@ -98,8 +139,7 @@ export interface Reflection {
   pattern_type?: string;
   created_at: Date;
   embedding?: number[];
-  metadata: Record<string, any>;
-  /** v3.9+ 结构化可执行动作计划 */
+  metadata: ReflectionMetadata;
   action_plan?: ActionPlan | null;
   /** v3.9+ 模式被 apply 的时间戳 */
   applied_at?: string | null;
@@ -152,7 +192,7 @@ export interface SessionMap {
   model_context_limit: number;
   created_at: Date;
   last_active_at: Date;
-  metadata: Record<string, any>;
+  metadata: SessionMapMetadata;
 }
 
 export interface TopicSegment {
@@ -166,19 +206,7 @@ export interface TopicSegment {
   created_at: Date;
   closed_at?: Date;
   observation_count: number;
-  metadata: Record<string, any>;
-}
-
-// Internal (camelCase) version for in-memory use
-export interface TopicSegmentInfo {
-  id: string;
-  sessionMapId: string;
-  index: number;
-  summary?: string;
-  embedding?: number[];
-  startMessageId?: string;
-  endMessageId?: string;
-  observationCount: number;
+  metadata: Record<string, unknown>;
 }
 
 // ============================================================
@@ -516,5 +544,97 @@ export interface HindsightReflectOutput {
   duration_ms: number;
 }
 
-// NOTE: RecallMemoryInput / RecallMemoryOutput are defined in
-// src/mcp/recall-memory.ts (self-contained module).
+// ============================================================
+// Recall Memory types (moved from src/mcp/recall-memory.ts)
+// ============================================================
+
+export interface RecallMemoryInput {
+  query: string;
+  session_id?: string;
+  omo_task_id?: string;
+  topic_segment_id?: string;
+  caller_context?: {
+    type: "user" | "omo_agent";
+    current_goal?: string;
+    current_session_id?: string;
+  };
+  scope?: "session" | "task" | "project";
+  aggregate_similar?: boolean;
+  retrieval_strategies?: Array<
+    "semantic" | "bm25" | "graph" | "keyword" | "temporal"
+  >;
+  max_results?: number;
+  filters?: {
+    min_confidence?: number;
+    min_importance?: number;
+    tier?: "permanent" | "project" | "session";
+    tier_levels?: Array<"permanent" | "project" | "session">;
+    entity_types?: string[];
+    exclude_topic_segment_ids?: string[];
+    time_range_days?: number;
+  };
+  rerank?: boolean;
+}
+
+export interface MemoryResult {
+  id: string;
+  type: "entity" | "observation" | "reflection" | "relation";
+  data: Record<string, any>;
+  relevance_score: number;
+  context: {
+    session_id: string;
+    omo_task_id?: string;
+    topic_segment_id: string;
+    topic_summary?: string;
+    timestamp: string;
+  };
+  content: string;
+  metadata: Record<string, any>;
+}
+
+export interface RecallMemoryOutput {
+  query: string;
+  context_used?: {
+    topic_segment_id: string;
+    topic_summary: string;
+  };
+  success: boolean;
+  results: MemoryResult[];
+  total_found: number;
+  retrieval_time_ms: number;
+  strategies_used: string[];
+  session_id: string;
+  error?: string;
+}
+
+export interface RecallMemoryConfig {
+  weights: {
+    semantic: number;
+    recency: number;
+    importance: number;
+  };
+  maxResults: number;
+  rerankEnabled: boolean;
+  decay?: DecayConfig;
+}
+
+export interface DecayConfig {
+  enabled: boolean;
+  factor: number;
+  maxAgeDays: number;
+}
+
+/** Internal fact representation (intermediate, before MemoryResult) */
+export interface InternalFact {
+  id?: string;
+  type: "entity" | "observation" | "reflection" | "relation" | "message";
+  content: string;
+  relevanceScore: number;
+  metadata: Record<string, any>;
+  tokens: number;
+  _sessionId?: string;
+  _omoTaskId?: string;
+  _topicSegmentId?: string;
+  _topicSummary?: string;
+  _timestamp?: string;
+}

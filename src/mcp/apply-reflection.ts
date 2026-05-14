@@ -11,6 +11,9 @@
  * - 可逆：只追加，不删除
  * - 原子：使用临时文件 + rename 防止并发写入破坏
  * - 不阻塞：所有错误 try/catch，返回结构化错误
+ *
+ * 管道函数：
+ * - checkDuplicate() → checkCooldown() → formatRule() → writeRuleAtomic() → markApplied()
  */
 
 import { Pool } from "pg";
@@ -26,7 +29,6 @@ const logger = createLogger("apply-reflection");
 
 // ── 路径 ────────────────────────────────────────────────
 
-/** rules.md 路径：~/.config/opencode/rules.md */
 function getRulesMdPath(): string {
   const configDir = process.env.XDG_CONFIG_HOME
     ? join(process.env.XDG_CONFIG_HOME, "opencode")
@@ -37,7 +39,6 @@ function getRulesMdPath(): string {
 // ── 输入输出类型 ──────────────────────────────────────
 
 export interface ApplyReflectionInput {
-  /** reflections 表 UUID */
   pattern_id: string;
 }
 
@@ -50,90 +51,66 @@ export interface ApplyReflectionOutput {
   error?: string;
 }
 
-// ── rules.md 操作 ─────────────────────────────────────
+// ── 管道：五大独立函数 ─────────────────────────────────
 
 const AUTO_SECTION_HEADER = "## Automated Rules (from opcode-pg-memory)";
-
-/** rules.md 不存在时返回的默认内容 */
 const DEFAULT_RULES_CONTENT = "# Project Rules\n";
 
-/**
- * 异步读取 rules.md；文件不存在则返回默认内容。
- */
-async function readRulesMd(path: string): Promise<string> {
-  try {
-    return await readFile(path, "utf-8");
-  } catch (err: any) {
-    if (err.code === "ENOENT") {
-      return DEFAULT_RULES_CONTENT;
-    }
-    logger.warn("Failed to read rules.md, starting fresh:", err);
-    return DEFAULT_RULES_CONTENT;
-  }
+interface ReflectionRow {
+  id: string;
+  pattern_type: string;
+  summary: string;
+  action_plan: any;
+  applied_at: string | null;
+  confidence: number;
 }
 
 /**
- * 在 rules.md 中追加一条规则。
- * 使用 写入临时文件 → rename 的原子写模式防止并发破坏。
+ * checkDuplicate — 检查该反射是否已被应用
  */
-async function appendRuleToRulesMd(
-  path: string,
-  ruleBullet: string,
-): Promise<void> {
-  const content = await readRulesMd(path);
-  const normalized = content.endsWith("\n") ? content : content + "\n";
-
-  // ── 去重：标准化比较（折叠空格 + 精确行匹配）──
-  const whenLine = ruleBullet.split("\n")[0]?.trim();
-  if (whenLine) {
-    // 折叠连续空格后再比较，防止细微空白差异导致漏判
-    const normalizedWhen = whenLine.replace(/\s+/g, " ");
-    const normalizedContent = content.replace(/\s+/g, " ");
-    if (normalizedContent.includes(normalizedWhen)) {
-      logger.info("Rule already exists in rules.md, skipping dedup append");
-      return;
-    }
+function checkDuplicate(row: ReflectionRow): ApplyReflectionOutput | null {
+  if (row.applied_at) {
+    return {
+      success: true,
+      applied: false,
+      pattern_type: row.pattern_type,
+      summary: row.summary,
+      error: "Already applied",
+    };
   }
-
-  const sectionStart = normalized.indexOf(AUTO_SECTION_HEADER);
-  let newContent: string;
-
-  if (sectionStart === -1) {
-    // 没有自动化规则区段 → 在末尾新建
-    newContent = normalized + `\n${AUTO_SECTION_HEADER}\n${ruleBullet}\n`;
-  } else {
-    // 已有区段 → 在区段末尾追加
-    const afterHeader = normalized.slice(
-      sectionStart + AUTO_SECTION_HEADER.length,
-    );
-    const nextSection = afterHeader.match(/\n## /);
-    const insertPos = nextSection
-      ? sectionStart + AUTO_SECTION_HEADER.length + nextSection.index!
-      : normalized.length;
-
-    newContent =
-      normalized.slice(0, insertPos) +
-      ruleBullet +
-      "\n" +
-      normalized.slice(insertPos);
-  }
-
-  // 确保父目录存在
-  const parentDir = dirname(path);
-  if (!existsSync(parentDir)) {
-    await mkdir(parentDir, { recursive: true });
-  }
-
-  // 原子写入：写临时文件 → rename 覆盖目标
-  const tmpPath = join(tmpdir(), `rules-${randomUUID()}.md.tmp`);
-  await writeFile(tmpPath, newContent, "utf-8");
-  await rename(tmpPath, path);
-
-  logger.info(`Wrote rule to ${path}`);
+  return null;
 }
 
 /**
- * 将一条 ActionPlan 格式化为 rules.md 的 bullet point。
+ * checkCooldown — 检查同类 pattern 是否在 7 天内被应用过
+ */
+async function checkCooldown(
+  pool: Pool,
+  row: ReflectionRow,
+): Promise<ApplyReflectionOutput | null> {
+  if (!row.pattern_type) return null;
+
+  const cooldownCheck = await pool.query(
+    `SELECT COUNT(*) as cnt FROM reflections
+     WHERE pattern_type = $1
+       AND applied_at IS NOT NULL
+       AND applied_at > NOW() - INTERVAL '7 days'`,
+    [row.pattern_type],
+  );
+  if (parseInt(cooldownCheck.rows[0].cnt, 10) > 0) {
+    return {
+      success: true,
+      applied: false,
+      pattern_type: row.pattern_type,
+      summary: row.summary,
+      error: "Cooldown active — same pattern_type was applied within 7 days",
+    };
+  }
+  return null;
+}
+
+/**
+ * formatRule — 将 ActionPlan 格式化为 rules.md bullet point
  */
 function formatRule(
   pattern_type: string,
@@ -157,11 +134,81 @@ function formatRule(
   }
 
   parts.push(`  _Source: ${pattern_type} reflection_`);
-
   return parts.join("\n");
 }
 
-// ── 主处理函数 ────────────────────────────────────────
+/**
+ * writeRuleAtomic — 原子写入 rules.md（临时文件 + rename）
+ */
+async function writeRuleAtomic(
+  path: string,
+  ruleBullet: string,
+): Promise<void> {
+  const content = await readRulesMd(path);
+  const normalized = content.endsWith("\n") ? content : content + "\n";
+
+  // 去重：标准化比较
+  const whenLine = ruleBullet.split("\n")[0]?.trim();
+  if (whenLine) {
+    const normalizedWhen = whenLine.replace(/\s+/g, " ");
+    const normalizedContent = content.replace(/\s+/g, " ");
+    if (normalizedContent.includes(normalizedWhen)) {
+      logger.info("Rule already exists in rules.md, skipping dedup append");
+      return;
+    }
+  }
+
+  const sectionStart = normalized.indexOf(AUTO_SECTION_HEADER);
+  let newContent: string;
+
+  if (sectionStart === -1) {
+    newContent = normalized + `\n${AUTO_SECTION_HEADER}\n${ruleBullet}\n`;
+  } else {
+    const afterHeader = normalized.slice(
+      sectionStart + AUTO_SECTION_HEADER.length,
+    );
+    const nextSection = afterHeader.match(/\n## /);
+    const insertPos = nextSection
+      ? sectionStart + AUTO_SECTION_HEADER.length + nextSection.index!
+      : normalized.length;
+    newContent =
+      normalized.slice(0, insertPos) +
+      ruleBullet +
+      "\n" +
+      normalized.slice(insertPos);
+  }
+
+  const parentDir = dirname(path);
+  if (!existsSync(parentDir)) {
+    await mkdir(parentDir, { recursive: true });
+  }
+
+  const tmpPath = join(tmpdir(), `rules-${randomUUID()}.md.tmp`);
+  await writeFile(tmpPath, newContent, "utf-8");
+  await rename(tmpPath, path);
+  logger.info(`Wrote rule to ${path}`);
+}
+
+async function readRulesMd(path: string): Promise<string> {
+  try {
+    return await readFile(path, "utf-8");
+  } catch (err: any) {
+    if (err.code === "ENOENT") return DEFAULT_RULES_CONTENT;
+    logger.warn("Failed to read rules.md, starting fresh:", err);
+    return DEFAULT_RULES_CONTENT;
+  }
+}
+
+/**
+ * markApplied — 标记 applied_at 时间戳
+ */
+async function markApplied(pool: Pool, patternId: string): Promise<void> {
+  await pool.query(`UPDATE reflections SET applied_at = NOW() WHERE id = $1`, [
+    patternId,
+  ]);
+}
+
+// ── 主处理函数（协调器） ────────────────────────────────
 
 export async function applyReflection(
   input: ApplyReflectionInput,
@@ -179,41 +226,16 @@ export async function applyReflection(
       return { success: false, applied: false, error: "Pattern not found" };
     }
 
-    const row = rows[0];
+    const row: ReflectionRow = rows[0];
 
-    // 2. 检查是否已应用
-    if (row.applied_at) {
-      return {
-        success: true,
-        applied: false,
-        pattern_type: row.pattern_type,
-        summary: row.summary,
-        error: "Already applied",
-      };
-    }
+    // 2. 管道：逐级检查
+    const dupResult = checkDuplicate(row);
+    if (dupResult) return dupResult;
 
-    // 2b. 7 天冷却期：同类 pattern 刚应用过则跳过
-    if (row.pattern_type) {
-      const cooldownCheck = await pool.query(
-        `SELECT COUNT(*) as cnt FROM reflections
-         WHERE pattern_type = $1
-           AND applied_at IS NOT NULL
-           AND applied_at > NOW() - INTERVAL '7 days'`,
-        [row.pattern_type],
-      );
-      if (parseInt(cooldownCheck.rows[0].cnt, 10) > 0) {
-        return {
-          success: true,
-          applied: false,
-          pattern_type: row.pattern_type,
-          summary: row.summary,
-          error:
-            "Cooldown active — same pattern_type was applied within 7 days",
-        };
-      }
-    }
+    const cooldownResult = await checkCooldown(pool, row);
+    if (cooldownResult) return cooldownResult;
 
-    // 3. 检查是否有 action_plan
+    // 3. 检查 action_plan
     if (!row.action_plan) {
       return {
         success: false,
@@ -224,17 +246,12 @@ export async function applyReflection(
       };
     }
 
-    // 4. 格式化并异步原子写入 rules.md
-    const ruleMdPath = getRulesMdPath();
+    // 4. 格式化 & 原子写入
     const rule = formatRule(row.pattern_type, row.action_plan, row.summary);
+    await writeRuleAtomic(getRulesMdPath(), rule);
 
-    await appendRuleToRulesMd(ruleMdPath, rule);
-
-    // 5. 标记 applied_at
-    await pool.query(
-      `UPDATE reflections SET applied_at = NOW() WHERE id = $1`,
-      [input.pattern_id],
-    );
+    // 5. 标记已应用
+    await markApplied(pool, input.pattern_id);
 
     logger.info(`Applied reflection ${input.pattern_id} (${row.pattern_type})`);
 

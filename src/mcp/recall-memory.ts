@@ -1,315 +1,152 @@
 import { Pool } from "pg";
 import { createLogger } from "../services/logger";
 import { getEmbeddingService, EmbeddingService } from "../utils/embedding";
+import {
+  RecallMemoryInput,
+  RecallMemoryOutput,
+  MemoryResult,
+  RecallMemoryConfig,
+  DecayConfig,
+} from "../types";
+import {
+  resolveSessionId,
+  resolveScopeToSessionIds,
+  parallelRetrieve,
+  enrichWithContext,
+  mapType,
+  buildDataPayload,
+} from "../retrieval/utils";
+import {
+  mergeAndDeduplicate,
+  calculateMultiDimensionalScores,
+  applyFilters,
+  aggregateConsecutiveSimilar,
+  crossEncoderRerank,
+} from "../retrieval/fusion";
 
 const logger = createLogger("recall-memory");
-
-// ============================================================
-// Interfaces (enhanced — backward compatible with old MCP handler)
-// ============================================================
-
-export interface RecallMemoryInput {
-  /** The search query text */
-  query: string;
-  /** OpenCode session external ID. Auto-detected as most recent active session if omitted. */
-  session_id?: string;
-  /** OmO task ID for agent-scoped retrieval */
-  omo_task_id?: string;
-  /** Specific topic segment to bias toward (ignored if caller_context.current_session_id is set) */
-  topic_segment_id?: string;
-  /** Caller metadata for topic-context fusion and agent-aware retrieval */
-  caller_context?: {
-    type: "user" | "omo_agent";
-    current_goal?: string;
-    current_session_id?: string;
-  };
-  /** Retrieval scope. 'session' = current session only, 'task' = all sessions in same task, 'project' = all sessions in same project. Default: 'session' */
-  scope?: "session" | "task" | "project";
-  /** When true, consecutive same-tool observations are aggregated into summary lines. Default: false */
-  aggregate_similar?: boolean;
-  /** Retrieval strategies to execute in parallel. Default: ['semantic', 'bm25', 'graph'] */
-  retrieval_strategies?: Array<
-    "semantic" | "bm25" | "graph" | "keyword" | "temporal"
-  >;
-  /** Max results to return. Default: 10 */
-  max_results?: number;
-  /** Filters applied post-retrieval */
-  filters?: {
-    min_confidence?: number;
-    min_importance?: number;
-    /** Single tier filter */
-    tier?: "permanent" | "project" | "session";
-    /** Backward compat: array of tier levels (maps to tier for single value) */
-    tier_levels?: Array<"permanent" | "project" | "session">;
-    entity_types?: string[];
-    exclude_topic_segment_ids?: string[];
-    /** Time range in days (backward compat) */
-    time_range_days?: number;
-  };
-  /** Cross-encoder rerank (backward compat). Default: true */
-  rerank?: boolean;
-}
-
-export interface MemoryResult {
-  id: string;
-  type: "entity" | "observation" | "reflection" | "relation";
-  /** Structured data payload for the new interface */
-  data: Record<string, any>;
-  relevance_score: number;
-  /** Full context metadata */
-  context: {
-    session_id: string;
-    omo_task_id?: string;
-    topic_segment_id: string;
-    topic_summary?: string;
-    timestamp: string;
-  };
-  // ── backward-compat accessors (same data, flat) ──
-  content: string;
-  metadata: Record<string, any>;
-}
-
-export interface RecallMemoryOutput {
-  // ── new fields ──
-  query: string;
-  context_used?: {
-    topic_segment_id: string;
-    topic_summary: string;
-  };
-
-  // ── backward-compat fields ──
-  success: boolean;
-  results: MemoryResult[];
-  total_found: number;
-  retrieval_time_ms: number;
-  strategies_used: string[];
-  session_id: string;
-  error?: string;
-}
-
-export interface RecallMemoryConfig {
-  weights: {
-    semantic: number;
-    recency: number;
-    importance: number;
-  };
-  maxResults: number;
-  rerankEnabled: boolean;
-  decay?: DecayConfig;
-}
-
-export interface DecayConfig {
-  enabled: boolean;
-  factor: number; // per-day decay factor (0.99 = 1% per day)
-  maxAgeDays: number; // entities older than this get filtered out
-}
-
-// ============================================================
-// Constants
-// ============================================================
-
-const DEFAULT_DECAY_CONFIG: DecayConfig = {
+const DEFAULT_DECAY: DecayConfig = {
   enabled: true,
   factor: 0.99,
   maxAgeDays: 365,
 };
-
-const DEFAULT_CONFIG: RecallMemoryConfig = {
-  weights: {
-    semantic: 0.5,
-    recency: 0.3,
-    importance: 0.2,
-  },
+const TOPIC_RATIO = 0.3;
+const DEFAULT_CFG: RecallMemoryConfig = {
+  weights: { semantic: 0.5, recency: 0.3, importance: 0.2 },
   maxResults: 10,
   rerankEnabled: true,
-  decay: { ...DEFAULT_DECAY_CONFIG },
+  decay: { ...DEFAULT_DECAY },
 };
 
-/** Topic-fusion blend ratio: 70% query + 30% topic */
-const TOPIC_FUSION_RATIO = 0.3;
+export type {
+  RecallMemoryInput,
+  RecallMemoryOutput,
+  MemoryResult,
+  RecallMemoryConfig,
+  DecayConfig,
+};
+export { aggregateConsecutiveSimilar } from "../retrieval/fusion";
 
-/** Max results per strategy before merge */
-const PER_STRATEGY_LIMIT = 20;
-
-// ============================================================
-// Main function: recallMemory
-// ============================================================
-
-/**
- * Enhanced recall_memory MCP tool.
- *
- * Innovations:
- * 1. Topic context fusion — blends query embedding with current topic embedding
- * 2. Structured output — every result carries full context metadata
- * 3. Agent-friendly — OmO agents pass caller_context for better retrieval
- * 4. Enhanced filters — min_importance, tier, exclude_topic_segment_ids
- *
- * Backward compatible with simple { query: "..." } calls.
- */
+/** Enhanced recall_memory MCP tool -- multi-strategy retrieval with topic-context fusion. Backward compatible with simple { query: "..." } calls. */
 export async function recallMemory(
   input: RecallMemoryInput,
   pool: Pool,
   config: Partial<RecallMemoryConfig> = {},
 ): Promise<RecallMemoryOutput> {
-  const mergedConfig = { ...DEFAULT_CONFIG, ...config };
-  const startTime = Date.now();
-
-  logger.info(`recall_memory called: "${input.query.substring(0, 100)}..."`);
-
+  const cfg = { ...DEFAULT_CFG, ...config };
+  const t0 = Date.now();
   try {
-    // ── Step 0: Resolve session ID ──
-    const sessionId = await resolveSessionId(input, pool);
-
-    // ── Step 0b: Resolve scope to session IDs ──
+    const sid = await resolveSessionId(input, pool);
     const scope = input.scope || "session";
-    const sessionIds = await resolveScopeToSessionIds(pool, sessionId, scope);
-    if (scope !== "session") {
-      logger.info(`Scope ${scope}: ${sessionIds.length} sessions`);
-    }
+    const sids = await resolveScopeToSessionIds(pool, sid, scope);
+    if (scope !== "session")
+      logger.info("Scope " + scope + ": " + sids.length + " sessions");
 
-    // ── Step 1: Generate query embedding ──
-    const embeddingService = getEmbeddingService();
-    if (!embeddingService) {
-      throw new Error(
-        "Embedding service is not available. Check EMBEDDING_PROVIDER and API keys.",
-      );
-    }
-    const queryEmbedding = await embeddingService.generateEmbedding(
-      input.query,
-    );
+    const emb = getEmbeddingService();
+    if (!emb) throw new Error("Embedding service not available");
+    let qEmb = await emb.generateEmbedding(input.query);
+    let ctx: RecallMemoryOutput["context_used"] | undefined;
 
-    // ── Step 2: Topic context fusion ──
-    let fusedEmbedding = queryEmbedding;
-    let contextUsed: RecallMemoryOutput["context_used"] | undefined;
-
-    const effectiveSessionId =
-      input.caller_context?.current_session_id || input.session_id;
-
-    if (effectiveSessionId) {
-      const fusionResult = await topicContextFusion(
-        effectiveSessionId,
-        queryEmbedding,
-        embeddingService,
-        pool,
-      );
-      if (fusionResult) {
-        fusedEmbedding = fusionResult.fusedEmbedding;
-        contextUsed = fusionResult.contextUsed;
-        logger.info(
-          `Topic fusion applied (topic: ${fusionResult.contextUsed.topic_segment_id.substring(0, 8)}...)`,
-        );
+    if (input.session_id || sid) {
+      const f = await topicFusion(input.session_id || sid, qEmb, emb, pool);
+      if (f) {
+        qEmb = f.fusedEmbedding;
+        ctx = f.contextUsed;
       }
     }
 
-    // ── Step 3: Multi-strategy parallel retrieval ──
-    const strategies = input.retrieval_strategies || [
-      "semantic",
-      "bm25",
-      "graph",
-    ];
-    const retrievalResults = await parallelRetrieve(
+    const strats = input.retrieval_strategies || ["semantic", "bm25", "graph"];
+    const results = await parallelRetrieve(
       input.query,
-      fusedEmbedding,
-      sessionIds,
-      strategies,
+      qEmb,
+      sids,
+      strats,
       pool,
       input.filters,
     );
 
-    // ── Step 4: Merge & deduplicate ──
-    const mergedResults = mergeAndDeduplicate(retrievalResults);
+    let facts = mergeAndDeduplicate(results);
+    facts = calculateMultiDimensionalScores(facts, qEmb, cfg.weights, {
+      ...DEFAULT_DECAY,
+      ...cfg.decay,
+    });
+    facts = applyFilters(facts, input.filters);
+    if (input.aggregate_similar && facts.length > 0)
+      facts = aggregateConsecutiveSimilar(facts);
+    if (input.rerank !== false && cfg.rerankEnabled)
+      facts = await crossEncoderRerank(facts, input.query);
+    facts = facts.slice(0, input.max_results || cfg.maxResults);
+    facts = await enrichWithContext(facts, sid, pool);
 
-    // ── Step 5: Multi-dimensional scoring (with time-based decay) ──
-    const scoredResults = calculateMultiDimensionalScores(
-      mergedResults,
-      fusedEmbedding,
-      mergedConfig.weights,
-      { ...DEFAULT_DECAY_CONFIG, ...mergedConfig.decay },
-    );
-
-    // ── Step 6: Apply filters ──
-    let filteredResults = applyFilters(scoredResults, input.filters);
-
-    // ── Step 6.5: Aggregate similar observations (if enabled) ──
-    if (input.aggregate_similar && filteredResults.length > 0) {
-      filteredResults = aggregateConsecutiveSimilar(filteredResults);
-    }
-
-    // ── Step 7: Cross-encoder rerank (backward compat) ──
-    if (input.rerank !== false && mergedConfig.rerankEnabled) {
-      filteredResults = await crossEncoderRerank(filteredResults, input.query);
-    }
-
-    // ── Step 8: Limit results ──
-    const maxResults = input.max_results || mergedConfig.maxResults;
-    filteredResults = filteredResults.slice(0, maxResults);
-
-    // ── Step 9: Enrich with context ──
-    const enrichedResults = await enrichWithContext(
-      filteredResults,
-      sessionId,
-      pool,
-    );
-
-    // ── Step 10: Convert to structured MemoryResult ──
-    const results: MemoryResult[] = enrichedResults.map((fact) => {
+    const memoryResults: MemoryResult[] = facts.map((fact) => {
       const id =
         fact.id ||
-        `fallback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        "fb-" + Date.now() + "-" + Math.random().toString(36).slice(2);
       return {
         id,
         type: mapType(fact.type),
         data: buildDataPayload(fact),
         relevance_score: fact.relevanceScore,
         context: {
-          session_id: fact._sessionId || sessionId,
+          session_id: fact._sessionId || sid,
           omo_task_id: fact._omoTaskId,
           topic_segment_id: fact._topicSegmentId || "unknown",
           topic_summary: fact._topicSummary,
           timestamp: fact._timestamp || new Date().toISOString(),
         },
-        // backward-compat flat fields
         content: fact.content,
         metadata: {
           ...fact.metadata,
           id,
           topic_segment_id: fact._topicSegmentId,
           topic_summary: fact._topicSummary,
-          session_id: fact._sessionId || sessionId,
+          session_id: fact._sessionId || sid,
         },
       };
     });
 
-    const retrievalTime = Date.now() - startTime;
-    if (retrievalTime > 1000) {
-      logger.warn(
-        `slow recall_memory: ${results.length} results in ${retrievalTime}ms`,
-      );
-    } else {
-      logger.info(
-        `recall_memory completed: ${results.length} results in ${retrievalTime}ms`,
-      );
-    }
-
+    const ms = Date.now() - t0;
+    (ms > 1000 ? logger.warn : logger.info)(
+      "recall_memory: " + memoryResults.length + " results in " + ms + "ms",
+    );
     return {
       query: input.query,
-      context_used: contextUsed,
+      context_used: ctx,
       success: true,
-      results,
-      total_found: mergedResults.length,
-      retrieval_time_ms: retrievalTime,
-      strategies_used: strategies,
-      session_id: sessionId,
+      results: memoryResults,
+      total_found: memoryResults.length,
+      retrieval_time_ms: ms,
+      strategies_used: strats,
+      session_id: sid,
     };
   } catch (error: any) {
     logger.error("recall_memory error:", error);
-    const retrievalTime = Date.now() - startTime;
     return {
       query: input.query,
       success: false,
       results: [],
       total_found: 0,
-      retrieval_time_ms: retrievalTime,
+      retrieval_time_ms: Date.now() - t0,
       strategies_used: [],
       session_id: "",
       error: error.message || String(error),
@@ -317,1216 +154,51 @@ export async function recallMemory(
   }
 }
 
-// ============================================================
-// Internal fact representation (intermediate, before MemoryResult)
-// ============================================================
-
-interface InternalFact {
-  id?: string;
-  type: "entity" | "observation" | "reflection" | "relation" | "message";
-  content: string;
-  relevanceScore: number;
-  metadata: Record<string, any>;
-  tokens: number;
-  // context fields populated by enrichWithContext
-  _sessionId?: string;
-  _omoTaskId?: string;
-  _topicSegmentId?: string;
-  _topicSummary?: string;
-  _timestamp?: string;
-}
-
-// ============================================================
-// Step 0: Session ID resolution
-// ============================================================
-
-async function resolveSessionId(
-  input: RecallMemoryInput,
-  pool: Pool,
-): Promise<string> {
-  if (input.session_id) {
-    // Provided session_id — try session_map first, then fall back to sessions
-    const id = await resolveExternalSessionId(input.session_id, pool);
-    if (id) return id;
-
-    // If not found in session_map, try legacy sessions table
-    const legacyResult = await pool.query(
-      "SELECT id FROM sessions WHERE external_id = $1",
-      [input.session_id],
-    );
-    if (legacyResult.rows.length > 0) return legacyResult.rows[0].id;
-    throw new Error(`Session not found: ${input.session_id}`);
-  }
-
-  // Auto-detect: try session_map first, then sessions
-  try {
-    const recent = await pool.query(
-      "SELECT id, opencode_session_id FROM session_map ORDER BY last_active_at DESC LIMIT 1",
-    );
-    if (recent.rows.length > 0) {
-      logger.info(
-        `Auto-detected session: ${recent.rows[0].opencode_session_id}`,
-      );
-      return recent.rows[0].id;
-    }
-  } catch {
-    // session_map table doesn't exist yet
-  }
-
-  // Fall back to legacy sessions
-  const recentSession = await pool.query(
-    "SELECT id, external_id FROM sessions ORDER BY updated_at DESC NULLS LAST, created_at DESC LIMIT 1",
-  );
-  if (recentSession.rows.length > 0) {
-    logger.info(
-      `Auto-detected session (legacy): ${recentSession.rows[0].external_id}`,
-    );
-    return recentSession.rows[0].id;
-  }
-
-  throw new Error(
-    "No session found. Please start a conversation first or provide session_id explicitly.",
-  );
-}
-
-/**
- * Resolve an external session ID to internal UUID via session_map or sessions table.
- */
-async function resolveExternalSessionId(
-  externalId: string,
-  pool: Pool,
-): Promise<string | null> {
-  // Try session_map
-  try {
-    const result = await pool.query(
-      "SELECT id FROM session_map WHERE opencode_session_id = $1",
-      [externalId],
-    );
-    if (result.rows.length > 0) return result.rows[0].id;
-  } catch {
-    // table may not exist
-  }
-
-  // Try legacy sessions
-  const legacy = await pool.query(
-    "SELECT id FROM sessions WHERE external_id = $1",
-    [externalId],
-  );
-  if (legacy.rows.length > 0) return legacy.rows[0].id;
-
-  return null;
-}
-
-// ============================================================
-// Scope resolver
-// ============================================================
-
-/**
- * Resolve scope to an array of session_map UUIDs.
- * - 'session': returns only the base session
- * - 'task': returns all sessions sharing the same omo_task_id
- * - 'project': returns all sessions sharing the same project_id
- */
-async function resolveScopeToSessionIds(
-  pool: Pool,
-  baseSessionMapId: string,
-  scope: string,
-): Promise<string[]> {
-  if (scope === "session") {
-    return [baseSessionMapId];
-  }
-
-  if (scope === "task") {
-    try {
-      const taskResult = await pool.query(
-        "SELECT omo_task_id FROM session_map WHERE id = $1",
-        [baseSessionMapId],
-      );
-      if (taskResult.rows.length === 0 || !taskResult.rows[0].omo_task_id) {
-        logger.warn(
-          "scope=task but omo_task_id is NULL, falling back to current session",
-        );
-        return [baseSessionMapId];
-      }
-      const omoTaskId = taskResult.rows[0].omo_task_id;
-      const sessionsResult = await pool.query(
-        "SELECT id FROM session_map WHERE omo_task_id = $1",
-        [omoTaskId],
-      );
-      const ids = sessionsResult.rows.map((r: any) => r.id);
-      return ids.length > 0 ? ids : [baseSessionMapId];
-    } catch {
-      return [baseSessionMapId];
-    }
-  }
-
-  if (scope === "project") {
-    try {
-      const projectResult = await pool.query(
-        "SELECT project_id FROM session_map WHERE id = $1",
-        [baseSessionMapId],
-      );
-      if (
-        projectResult.rows.length === 0 ||
-        !projectResult.rows[0].project_id
-      ) {
-        return [baseSessionMapId];
-      }
-      const projectId = projectResult.rows[0].project_id;
-      const sessionsResult = await pool.query(
-        "SELECT id FROM session_map WHERE project_id = $1",
-        [projectId],
-      );
-      const ids = sessionsResult.rows.map((r: any) => r.id);
-      return ids.length > 0 ? ids : [baseSessionMapId];
-    } catch {
-      return [baseSessionMapId];
-    }
-  }
-
-  return [baseSessionMapId];
-}
-
-// ============================================================
-// Step 2: Topic context fusion
-// ============================================================
-
-async function topicContextFusion(
-  externalSessionId: string,
-  queryEmbedding: number[],
-  embeddingService: EmbeddingService,
+/** Topic context fusion -- blends query embedding with current topic embedding (70/30 ratio) */
+async function topicFusion(
+  extId: string,
+  qEmb: number[],
+  embSvc: EmbeddingService,
   pool: Pool,
 ): Promise<{
   fusedEmbedding: number[];
   contextUsed: NonNullable<RecallMemoryOutput["context_used"]>;
 } | null> {
   try {
-    // Look up internal session ID
-    const sessionLookup = await pool.query(
-      `SELECT id FROM session_map WHERE opencode_session_id = $1
-       UNION ALL
-       SELECT id FROM sessions WHERE external_id = $1
-       LIMIT 1`,
-      [externalSessionId],
+    const lk = await pool.query(
+      "SELECT id FROM session_map WHERE opencode_session_id = $1 UNION ALL SELECT id FROM sessions WHERE external_id = $1 LIMIT 1",
+      [extId],
     );
-    if (sessionLookup.rows.length === 0) return null;
-    const internalSessionId = sessionLookup.rows[0].id;
-
-    // Find most recent active topic segment for this session
-    const topicResult = await pool.query(
-      `SELECT id, summary, embedding
-       FROM topic_segments
-       WHERE session_map_id = $1
-         AND closed_at IS NULL
-         AND embedding IS NOT NULL
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [internalSessionId],
+    if (lk.rows.length === 0) return null;
+    const isid = lk.rows[0].id;
+    const topic = await pool.query(
+      "SELECT id, summary, embedding FROM topic_segments WHERE session_map_id = $1 AND closed_at IS NULL AND embedding IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+      [isid],
     );
-
-    if (topicResult.rows.length === 0) {
-      // Try finding any topic segment with embedding
-      const anyTopic = await pool.query(
-        `SELECT id, summary, embedding
-         FROM topic_segments
-         WHERE session_map_id = $1
-           AND embedding IS NOT NULL
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [internalSessionId],
-      );
-      if (anyTopic.rows.length === 0) return null;
-
-      const topicEmbedding = anyTopic.rows[0].embedding as number[];
-      const fusedEmbedding = fuseEmbeddings(
-        queryEmbedding,
-        topicEmbedding,
-        TOPIC_FUSION_RATIO,
-      );
-
-      return {
-        fusedEmbedding,
-        contextUsed: {
-          topic_segment_id: anyTopic.rows[0].id,
-          topic_summary: anyTopic.rows[0].summary || "No summary",
-        },
-      };
-    }
-
-    const topicEmbedding = topicResult.rows[0].embedding as number[];
-    const fusedEmbedding = fuseEmbeddings(
-      queryEmbedding,
-      topicEmbedding,
-      TOPIC_FUSION_RATIO,
-    );
-
-    return {
-      fusedEmbedding,
+    const use = (r: any) => ({
+      fusedEmbedding: fuse(qEmb, r.embedding, TOPIC_RATIO),
       contextUsed: {
-        topic_segment_id: topicResult.rows[0].id,
-        topic_summary: topicResult.rows[0].summary || "No summary",
+        topic_segment_id: r.id,
+        topic_summary: r.summary || "No summary",
       },
-    };
+    });
+    if (topic.rows.length > 0) return use(topic.rows[0]);
+    const any = await pool.query(
+      "SELECT id, summary, embedding FROM topic_segments WHERE session_map_id = $1 AND embedding IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+      [isid],
+    );
+    if (any.rows.length > 0) return use(any.rows[0]);
+    return null;
   } catch (err) {
-    // topic_segments table may not exist — skip fusion gracefully
-    logger.warn("Topic context fusion skipped:", err);
+    logger.warn("Topic fusion skipped:", err);
     return null;
   }
 }
 
-/**
- * Fuse two embeddings: fused = normalize((1-ratio) * a + ratio * b)
- */
-function fuseEmbeddings(
-  queryEmb: number[],
-  topicEmb: number[],
-  topicRatio: number,
-): number[] {
-  const dim = Math.min(queryEmb.length, topicEmb.length);
-  const result: number[] = new Array(dim);
-  const queryWeight = 1 - topicRatio;
-
-  for (let i = 0; i < dim; i++) {
-    result[i] =
-      queryWeight * (queryEmb[i] || 0) + topicRatio * (topicEmb[i] || 0);
-  }
-
-  return normalizeVector(result);
+function fuse(a: number[], b: number[], r: number): number[] {
+  return norm(a.map((v, i) => (1 - r) * v + r * (b[i] || 0)));
 }
-
-/**
- * L2-normalize a vector to unit length.
- */
-function normalizeVector(vec: number[]): number[] {
-  const magnitude = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0));
-  if (magnitude === 0) return vec.slice();
-  return vec.map((v) => v / magnitude);
-}
-
-// ============================================================
-// Step 3: Multi-strategy parallel retrieval
-// ============================================================
-
-async function parallelRetrieve(
-  query: string,
-  queryEmbedding: number[],
-  sessionIds: string[],
-  strategies: string[],
-  pool: Pool,
-  filters?: RecallMemoryInput["filters"],
-): Promise<Map<string, InternalFact[]>> {
-  const results = new Map<string, InternalFact[]>();
-
-  const filterSQL = buildFilterConditions(filters);
-
-  const promises: Promise<void>[] = [];
-
-  if (strategies.includes("semantic")) {
-    promises.push(
-      (async () => {
-        try {
-          const r = await semanticSearch(
-            queryEmbedding,
-            sessionIds,
-            pool,
-            filterSQL,
-          );
-          results.set("semantic", r);
-        } catch (err) {
-          logger.warn("Semantic search failed:", err);
-          results.set("semantic", []);
-        }
-      })(),
-    );
-  }
-
-  if (strategies.includes("bm25")) {
-    promises.push(
-      (async () => {
-        try {
-          const r = await bm25Search(query, sessionIds, pool, filterSQL);
-          results.set("bm25", r);
-        } catch (err) {
-          logger.warn("BM25 search failed:", err);
-          results.set("bm25", []);
-        }
-      })(),
-    );
-  }
-
-  if (strategies.includes("graph")) {
-    promises.push(
-      (async () => {
-        try {
-          const r = await graphTraversal(
-            query,
-            embeddingServiceFallback(query),
-            sessionIds,
-            pool,
-            filterSQL,
-          );
-          results.set("graph", r);
-        } catch (err) {
-          logger.warn("Graph traversal failed:", err);
-          results.set("graph", []);
-        }
-      })(),
-    );
-  }
-
-  if (strategies.includes("keyword")) {
-    promises.push(
-      (async () => {
-        try {
-          const r = await keywordSearch(query, sessionIds, pool, filterSQL);
-          results.set("keyword", r);
-        } catch (err) {
-          logger.warn("Keyword search failed:", err);
-          results.set("keyword", []);
-        }
-      })(),
-    );
-  }
-
-  await Promise.all(promises);
-  return results;
-}
-
-/** Fallback embedding for non-vector strategies (simple keyword affinity) */
-function embeddingServiceFallback(_query: string): number[] {
-  // Graph traversal uses keyword matching, not vector search
-  return [];
-}
-
-// ============================================================
-// Filter builder
-// ============================================================
-
-function buildFilterConditions(filters?: RecallMemoryInput["filters"]): {
-  sql: string;
-  params: any[];
-} {
-  const conditions: string[] = [];
-  const params: any[] = [];
-  let idx = 1;
-
-  if (filters?.min_confidence !== undefined) {
-    conditions.push(`(e.confidence >= $${idx} OR o.importance IS NULL)`);
-    params.push(filters.min_confidence);
-    idx++;
-  }
-
-  // Note: min_importance, tier, entity_types, exclude_topic_segment_ids are applied
-  // in the post-retrieval applyFilters() step, not in SQL.
-
-  const sql = conditions.length > 0 ? `AND ${conditions.join(" AND ")}` : "";
-  return { sql, params };
-}
-
-// ============================================================
-// Semantic search (vector)
-// ============================================================
-
-async function semanticSearch(
-  queryEmbedding: number[],
-  sessionIds: string[],
-  pool: Pool,
-  filters: { sql: string; params: any[] },
-): Promise<InternalFact[]> {
-  const facts: InternalFact[] = [];
-  const embeddingStr = formatVectorLiteral(queryEmbedding);
-
-  // ── 1. Entities (via session_map + topic_segments if available, fall back to sessions) ──
-  try {
-    const entityQuery = `
-      SELECT e.id, e.name, e.type, e.tier, e.weight, e.description,
-             1 - (e.embedding <=> $1) as similarity,
-             e.first_seen_at as created_at, e.confidence,
-             e.session_id, e.session_map_id, e.topic_segment_id
-      FROM entities e
-      LEFT JOIN session_map sm ON e.session_map_id = sm.id
-      LEFT JOIN topic_segments ts ON e.topic_segment_id = ts.id
-      WHERE (e.session_map_id = ANY($2::uuid[]) OR e.session_id = ANY($2::uuid[]) OR e.tier = 'permanent')
-        AND e.embedding IS NOT NULL
-        ${filters.sql}
-      ORDER BY e.embedding <=> $1
-      LIMIT ${PER_STRATEGY_LIMIT}
-    `;
-    const entityResult = await pool.query(entityQuery, [
-      queryEmbedding,
-      sessionIds,
-      ...filters.params.filter((_, i) => i < filters.params.length),
-    ]);
-    facts.push(
-      ...entityResult.rows.map((row) => ({
-        id: row.id,
-        type: "entity" as const,
-        content: `[${(row.type || "").toUpperCase()}] ${row.name}: ${row.description || ""}`,
-        relevanceScore: row.similarity ?? 0,
-        tokens: 0,
-        metadata: {
-          entityType: row.type,
-          weight: row.weight,
-          confidence: row.confidence,
-          createdAt: row.created_at,
-          tier: row.tier,
-          source: "semantic",
-        },
-        _sessionId: row.session_map_id || row.session_id,
-        _topicSegmentId: row.topic_segment_id,
-        _timestamp: row.created_at,
-      })),
-    );
-  } catch (err) {
-    logger.warn("Entity semantic search error:", err);
-  }
-
-  // ── 2. Observations ──
-  try {
-    const obsQuery = `
-      SELECT o.id, o.tool_name, o.tool_output_summary as content, o.embedding,
-             1 - (o.embedding <=> $1) as similarity,
-             o.created_at, o.importance,
-             o.session_id, o.session_map_id, o.topic_segment_id
-      FROM observations o
-      LEFT JOIN session_map sm ON o.session_map_id = sm.id
-      LEFT JOIN topic_segments ts ON o.topic_segment_id = ts.id
-      WHERE (o.session_map_id = ANY($2::uuid[]) OR o.session_id = ANY($2::uuid[]))
-        AND o.embedding IS NOT NULL
-      ORDER BY o.embedding <=> $1
-      LIMIT ${PER_STRATEGY_LIMIT}
-    `;
-    const obsResult = await pool.query(obsQuery, [queryEmbedding, sessionIds]);
-    facts.push(
-      ...obsResult.rows.map((row) => ({
-        id: row.id,
-        type: "observation" as const,
-        content: `[${row.tool_name || "Observation"}] ${row.content || ""}`,
-        relevanceScore: row.similarity ?? 0,
-        tokens: 0,
-        metadata: {
-          toolName: row.tool_name,
-          importance: row.importance,
-          createdAt: row.created_at,
-          source: "semantic",
-        },
-        _sessionId: row.session_map_id || row.session_id,
-        _topicSegmentId: row.topic_segment_id,
-        _timestamp: row.created_at,
-      })),
-    );
-  } catch (err) {
-    logger.warn("Observation semantic search error:", err);
-  }
-
-  // ── 3. Reflections ──
-  try {
-    const refQuery = `
-      SELECT r.id, r.summary as content, r.pattern_type, r.embedding,
-             1 - (r.embedding <=> $1) as similarity,
-             r.created_at, r.confidence,
-             r.session_id, r.session_map_id, r.topic_segment_id
-      FROM reflections r
-      LEFT JOIN session_map sm ON r.session_map_id = sm.id
-      LEFT JOIN topic_segments ts ON r.topic_segment_id = ts.id
-      WHERE (r.session_map_id = ANY($2::uuid[]) OR r.session_id = ANY($2::uuid[]))
-        AND r.embedding IS NOT NULL
-      ORDER BY r.embedding <=> $1
-      LIMIT ${PER_STRATEGY_LIMIT / 2}
-    `;
-    const refResult = await pool.query(refQuery, [queryEmbedding, sessionIds]);
-    facts.push(
-      ...refResult.rows.map((row) => ({
-        id: row.id,
-        type: "reflection" as const,
-        content: `[Reflection${row.pattern_type ? ` - ${row.pattern_type}` : ""}] ${row.content || ""}`,
-        relevanceScore: row.similarity ?? 0,
-        tokens: 0,
-        metadata: {
-          patternType: row.pattern_type,
-          confidence: row.confidence,
-          createdAt: row.created_at,
-          source: "semantic",
-        },
-        _sessionId: row.session_map_id || row.session_id,
-        _topicSegmentId: row.topic_segment_id,
-        _timestamp: row.created_at,
-      })),
-    );
-  } catch (err) {
-    logger.warn("Reflection semantic search error:", err);
-  }
-
-  return facts;
-}
-
-// ============================================================
-// BM25 / trigram text search
-// ============================================================
-
-async function bm25Search(
-  query: string,
-  sessionIds: string[],
-  pool: Pool,
-  filters: { sql: string; params: any[] },
-): Promise<InternalFact[]> {
-  const queryTerms = query.split(/\s+/).filter((t) => t.length > 2);
-  if (queryTerms.length === 0) return [];
-
-  const facts: InternalFact[] = [];
-
-  try {
-    const entityQuery = `
-      SELECT e.id, e.name, e.type, e.tier, e.weight, e.description,
-             similarity(e.name, $1) as bm25_score,
-             e.first_seen_at as created_at, e.confidence,
-             e.session_id, e.session_map_id, e.topic_segment_id
-      FROM entities e
-      WHERE (e.session_map_id = ANY($2::uuid[]) OR e.session_id = ANY($2::uuid[]) OR e.tier = 'permanent')
-        AND (e.name % $1 OR e.description % $1)
-        ${filters.sql}
-      ORDER BY similarity(e.name, $1) DESC
-      LIMIT ${PER_STRATEGY_LIMIT}
-    `;
-    const entityResult = await pool.query(entityQuery, [
-      query,
-      sessionIds,
-      ...filters.params,
-    ]);
-    facts.push(
-      ...entityResult.rows.map((row) => ({
-        id: row.id,
-        type: "entity" as const,
-        content: `[${(row.type || "").toUpperCase()}] ${row.name}: ${row.description || ""}`,
-        relevanceScore: row.bm25_score ?? 0,
-        tokens: 0,
-        metadata: {
-          entityType: row.type,
-          weight: row.weight,
-          confidence: row.confidence,
-          createdAt: row.created_at,
-          tier: row.tier,
-          source: "bm25",
-        },
-        _sessionId: row.session_map_id || row.session_id,
-        _topicSegmentId: row.topic_segment_id,
-        _timestamp: row.created_at,
-      })),
-    );
-  } catch (err) {
-    logger.warn("BM25 search failed (pg_trgm may not be installed):", err);
-  }
-
-  return facts;
-}
-
-// ============================================================
-// Graph traversal
-// ============================================================
-
-async function graphTraversal(
-  query: string,
-  _queryEmb: number[],
-  sessionIds: string[],
-  pool: Pool,
-  filters: { sql: string; params: any[] },
-): Promise<InternalFact[]> {
-  // 1. Find seed entities matching query text
-  let seedQuery: string;
-  let seedParams: any[];
-
-  try {
-    // Try newer schema (session_map_id)
-    seedQuery = `
-      SELECT id, name, type
-      FROM entities
-      WHERE (session_map_id = ANY($1::uuid[]) OR session_id = ANY($1::uuid[]) OR tier = 'permanent')
-        AND (name ILIKE $2 OR description ILIKE $2)
-      LIMIT 5
-    `;
-    seedParams = [sessionIds, `%${query}%`];
-  } catch {
-    return [];
-  }
-
-  const seedResult = await pool.query(seedQuery, seedParams);
-  if (seedResult.rows.length === 0) return [];
-
-  const seedIds = seedResult.rows.map((row) => row.id);
-
-  // 2. Traverse relations (1-hop neighbors) using the graph query pattern from spec
-  const graphQuery = `
-    SELECT
-      e2.id, e2.name, e2.type, e2.tier, e2.weight, e2.description,
-      e2.first_seen_at as created_at, e2.confidence,
-      r.relation_type,
-      e_seed.name as related_entity_name,
-      e2.session_id, e2.session_map_id, e2.topic_segment_id
-    FROM entities e_seed
-    JOIN relations r ON e_seed.id = r.source_entity_id
-    JOIN entities e2 ON r.target_entity_id = e2.id
-    WHERE e_seed.id = ANY($1)
-      AND r.confidence >= $2
-      AND e_seed.id != e2.id
-    ORDER BY r.confidence DESC
-    LIMIT ${PER_STRATEGY_LIMIT}
-  `;
-
-  try {
-    const graphResult = await pool.query(graphQuery, [seedIds, 0.5]);
-    return graphResult.rows.map((row) => ({
-      id: row.id,
-      type: "entity" as const,
-      content: `[${(row.type || "").toUpperCase()}] ${row.name}: ${row.description || ""} (related to ${row.related_entity_name} via ${row.relation_type})`,
-      relevanceScore: (row.confidence ?? 0) * 0.8,
-      tokens: 0,
-      metadata: {
-        entityType: row.type,
-        weight: row.weight,
-        confidence: row.confidence,
-        createdAt: row.created_at,
-        tier: row.tier,
-        relationType: row.relation_type,
-        relatedEntity: row.related_entity_name,
-        source: "graph",
-      },
-      _sessionId: row.session_map_id || row.session_id,
-      _topicSegmentId: row.topic_segment_id,
-      _timestamp: row.created_at,
-    }));
-  } catch (err) {
-    logger.warn("Graph traversal error:", err);
-    return [];
-  }
-}
-
-// ============================================================
-// Keyword search
-// ============================================================
-
-async function keywordSearch(
-  query: string,
-  sessionIds: string[],
-  pool: Pool,
-  filters: { sql: string; params: any[] },
-): Promise<InternalFact[]> {
-  const keywords = query.split(/\s+/).filter((k) => k.length > 2);
-  if (keywords.length === 0) return [];
-
-  const pattern = keywords.join("|");
-
-  try {
-    const entityQuery = `
-      SELECT e.id, e.name, e.type, e.tier, e.weight, e.description,
-             e.first_seen_at as created_at, e.confidence,
-             e.session_id, e.session_map_id, e.topic_segment_id
-      FROM entities e
-      WHERE (e.session_map_id = ANY($1::uuid[]) OR e.session_id = ANY($1::uuid[]) OR e.tier = 'permanent')
-        AND (e.name ~* $2 OR e.description ~* $2)
-        ${filters.sql}
-      LIMIT ${PER_STRATEGY_LIMIT}
-    `;
-    const entityResult = await pool.query(entityQuery, [
-      sessionIds,
-      pattern,
-      ...filters.params,
-    ]);
-
-    // Batch fetch relations for all matched entities: file→symbols and symbols→file
-    const entityIds = entityResult.rows.map((r: any) => r.id);
-    const relationsByEntity = new Map<string, string[]>();
-    if (entityIds.length > 0) {
-      const relResult = await pool.query(
-        `SELECT re.source_entity_id, re.target_entity_id, re.relation_type,
-                e_source.name as source_name, e_target.name as target_name,
-                e_source.type as source_type, e_target.type as target_type
-         FROM relations re
-         JOIN entities e_source ON re.source_entity_id = e_source.id
-         JOIN entities e_target ON re.target_entity_id = e_target.id
-         WHERE (re.source_entity_id = ANY($1::uuid[]) OR re.target_entity_id = ANY($1::uuid[]))
-           AND re.relation_type = 'references'
-         LIMIT 100`,
-        [entityIds],
-      );
-      for (const row of relResult.rows) {
-        // File → symbols: key by source (file)
-        if (!relationsByEntity.has(row.source_entity_id)) {
-          relationsByEntity.set(row.source_entity_id, []);
-        }
-        relationsByEntity
-          .get(row.source_entity_id)!
-          .push(`${row.target_name} (${row.target_type})`);
-        // Symbols → file: key by target (symbol)
-        if (!relationsByEntity.has(row.target_entity_id)) {
-          relationsByEntity.set(row.target_entity_id, []);
-        }
-        relationsByEntity
-          .get(row.target_entity_id)!
-          .push(`in: ${row.source_name}`);
-      }
-    }
-
-    return entityResult.rows.map((row) => {
-      const related = relationsByEntity.get(row.id);
-      let content = `[${(row.type || "").toUpperCase()}] ${row.name}: ${row.description || ""}`;
-      if (related && related.length > 0) {
-        content += ` | ${related.slice(0, 5).join(", ")}`;
-      }
-      return {
-        id: row.id,
-        type: "entity" as const,
-        content,
-        relevanceScore: 0.6,
-        tokens: 0,
-        metadata: {
-          entityType: row.type,
-          weight: row.weight,
-          confidence: row.confidence,
-          createdAt: row.created_at,
-          tier: row.tier,
-          source: "keyword",
-          related: related?.slice(0, 10),
-        },
-        _sessionId: row.session_map_id || row.session_id,
-        _topicSegmentId: row.topic_segment_id,
-        _timestamp: row.created_at,
-      };
-    });
-  } catch (err) {
-    logger.warn("Keyword search error:", err);
-    return [];
-  }
-}
-
-// ============================================================
-// Step 4: Merge & deduplicate
-// ============================================================
-
-function mergeAndDeduplicate(
-  strategyResults: Map<string, InternalFact[]>,
-): InternalFact[] {
-  const seen = new Set<string>();
-  const merged: InternalFact[] = [];
-
-  for (const [, facts] of strategyResults) {
-    for (const fact of facts) {
-      const key = `${fact.type}:${fact.id || fact.metadata.id || ""}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        merged.push(fact);
-      } else {
-        // Keep highest score
-        const existing = merged.find(
-          (f) => `${f.type}:${f.id || f.metadata.id || ""}` === key,
-        );
-        if (existing && fact.relevanceScore > existing.relevanceScore) {
-          existing.relevanceScore = fact.relevanceScore;
-        }
-      }
-    }
-  }
-
-  return merged;
-}
-
-// ============================================================
-// Step 5: Multi-dimensional scoring
-// ============================================================
-
-function calculateMultiDimensionalScores(
-  facts: InternalFact[],
-  _queryEmbedding: number[],
-  weights: { semantic: number; recency: number; importance: number },
-  decayConfig: DecayConfig = DEFAULT_DECAY_CONFIG,
-): InternalFact[] {
-  const now = new Date();
-
-  let results = facts
-    .map((fact) => {
-      const semanticScore = fact.relevanceScore;
-
-      // Recency decay
-      const createdAt = new Date(
-        fact.metadata.createdAt || fact._timestamp || Date.now(),
-      );
-      const daysAgo =
-        (now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24);
-      const recencyScore = 1.0 / (1 + daysAgo);
-
-      // Importance (normalize to 0-1)
-      const importance = fact.metadata.importance || fact.metadata.weight || 3;
-      const importanceScore = Math.min(1, importance / 5.0);
-
-      const finalScore =
-        weights.semantic * semanticScore +
-        weights.recency * recencyScore +
-        weights.importance * importanceScore;
-
-      let relevanceScore = Math.round(finalScore * 1000) / 1000;
-
-      // ── Apply time-based entity weight decay ──
-      if (decayConfig.enabled) {
-        const metadata = fact.metadata || {};
-        const lastSeen = metadata.createdAt || fact._timestamp || Date.now();
-        const daysSinceLastSeen =
-          (Date.now() - new Date(lastSeen).getTime()) / 86400000;
-
-        // Skip decay for permanent tier
-        if (metadata.tier !== "permanent") {
-          // Apply exponential decay to relevanceScore
-          const decayedWeight =
-            relevanceScore * Math.pow(decayConfig.factor, daysSinceLastSeen);
-          relevanceScore = Math.max(0.01, decayedWeight);
-
-          // Mark old, low-value results for filtering
-          if (
-            daysSinceLastSeen > decayConfig.maxAgeDays &&
-            relevanceScore < 0.1
-          ) {
-            relevanceScore = 0;
-          }
-        }
-      }
-
-      return {
-        ...fact,
-        relevanceScore,
-      };
-    })
-    .filter((r) => r.relevanceScore > 0)
-    .sort((a, b) => b.relevanceScore - a.relevanceScore);
-
-  return results;
-}
-
-// ============================================================
-// Step 6: Apply filters (post-retrieval)
-// ============================================================
-
-function applyFilters(
-  facts: InternalFact[],
-  filters?: RecallMemoryInput["filters"],
-): InternalFact[] {
-  if (!filters) return facts;
-
-  // Resolve tier filter: single `tier` takes precedence, fall back to `tier_levels` (first element)
-  const effectiveTiers: string[] = [];
-  if (filters.tier) {
-    effectiveTiers.push(filters.tier);
-  } else if (filters.tier_levels && filters.tier_levels.length > 0) {
-    effectiveTiers.push(...filters.tier_levels);
-  }
-
-  const now = Date.now();
-
-  return facts.filter((fact) => {
-    // min_confidence
-    if (filters.min_confidence !== undefined) {
-      const conf = fact.metadata.confidence;
-      if (conf !== undefined && conf !== null && conf < filters.min_confidence)
-        return false;
-    }
-
-    // min_importance
-    if (filters.min_importance !== undefined) {
-      const imp = fact.metadata.importance;
-      if (imp !== undefined && imp !== null && imp < filters.min_importance)
-        return false;
-    }
-
-    // tier filter (single + array backward compat)
-    if (effectiveTiers.length > 0) {
-      const tier = fact.metadata.tier;
-      if (tier && !effectiveTiers.includes(tier)) return false;
-    }
-
-    // entity_types filter
-    if (filters.entity_types && filters.entity_types.length > 0) {
-      const etype = fact.metadata.entityType;
-      if (etype && !filters.entity_types.includes(etype)) return false;
-    }
-
-    // exclude_topic_segment_ids
-    if (
-      filters.exclude_topic_segment_ids &&
-      filters.exclude_topic_segment_ids.length > 0
-    ) {
-      if (
-        fact._topicSegmentId &&
-        filters.exclude_topic_segment_ids.includes(fact._topicSegmentId)
-      ) {
-        return false;
-      }
-    }
-
-    // time_range_days (backward compat)
-    if (filters.time_range_days !== undefined) {
-      const ts = fact._timestamp || fact.metadata.createdAt;
-      if (ts) {
-        const ageMs = now - new Date(ts).getTime();
-        const ageDays = ageMs / (1000 * 60 * 60 * 24);
-        if (ageDays > filters.time_range_days) return false;
-      }
-    }
-
-    return true;
-  });
-}
-
-// ============================================================
-// Step 6b: Aggregate similar consecutive observations
-// ============================================================
-
-/**
- * When aggregate_similar is true, merges consecutive InternalFact items
- * that share the same tool_name and completed status into single summary entries.
- * Only affects observation-type facts.
- */
-export function aggregateConsecutiveSimilar(
-  facts: InternalFact[],
-): InternalFact[] {
-  if (facts.length === 0) return facts;
-
-  const result: InternalFact[] = [];
-  let i = 0;
-
-  while (i < facts.length) {
-    const current = facts[i];
-
-    // Only aggregate observation-type, completed tool calls
-    if (
-      current.type === "observation" &&
-      current.metadata?.source &&
-      current.metadata?.toolName &&
-      current.content
-    ) {
-      const toolName = current.metadata.toolName;
-
-      // Count consecutive same-tool observations
-      let j = i + 1;
-      while (
-        j < facts.length &&
-        facts[j].type === "observation" &&
-        facts[j].metadata?.toolName === toolName
-      ) {
-        j++;
-      }
-
-      const count = j - i;
-
-      if (count >= 2) {
-        // Merge: keep the last (most recent) item, update its content
-        const last = facts[j - 1];
-        const firstContent =
-          current.content.length > 80
-            ? current.content.substring(0, 80) + "..."
-            : current.content;
-        const lastContent =
-          last.content.length > 80
-            ? last.content.substring(0, 80) + "..."
-            : last.content;
-
-        result.push({
-          ...last,
-          content: `[${toolName} ×${count}] ${lastContent}`,
-          relevanceScore: Math.max(current.relevanceScore, last.relevanceScore),
-          metadata: {
-            ...last.metadata,
-            aggregated: true,
-            aggregateCount: count,
-            aggregateRange: `${firstContent} ... ${lastContent}`,
-          },
-        });
-
-        i = j; // Skip all merged items
-        continue;
-      }
-    }
-
-    // No aggregation: keep as-is
-    result.push(current);
-    i++;
-  }
-
-  return result;
-}
-
-// ============================================================
-// Step 7: Cross-encoder rerank (simplified)
-// ============================================================
-
-async function crossEncoderRerank(
-  facts: InternalFact[],
-  query: string,
-): Promise<InternalFact[]> {
-  const queryLower = query.toLowerCase();
-
-  const reranked = facts.map((fact) => {
-    const contentLower = fact.content.toLowerCase();
-    const queryWords = queryLower.split(/\s+/);
-    const contentWords = contentLower.split(/\s+/);
-
-    let overlap = 0;
-    for (const word of queryWords) {
-      if (word.length > 2 && contentWords.some((cw) => cw.includes(word))) {
-        overlap++;
-      }
-    }
-
-    const overlapScore =
-      queryWords.length > 0 ? overlap / queryWords.length : 0;
-    const adjustedScore = fact.relevanceScore * 0.7 + overlapScore * 0.3;
-
-    return {
-      ...fact,
-      relevanceScore: Math.round(adjustedScore * 1000) / 1000,
-    };
-  });
-
-  return reranked.sort((a, b) => b.relevanceScore - a.relevanceScore);
-}
-
-// ============================================================
-// Step 9: Enrich with context (session_map + topic_segments)
-// ============================================================
-
-async function enrichWithContext(
-  facts: InternalFact[],
-  sessionId: string,
-  pool: Pool,
-): Promise<InternalFact[]> {
-  if (facts.length === 0) return facts;
-
-  // Collect unique session IDs that need context lookup
-  const sessionIds = new Set<string>();
-  const topicIds = new Set<string>();
-
-  for (const fact of facts) {
-    if (fact._sessionId) sessionIds.add(fact._sessionId);
-    if (fact._topicSegmentId) topicIds.add(fact._topicSegmentId);
-  }
-
-  // Batch lookups
-  const [sessionMap, topicMap] = await Promise.all([
-    lookupSessions([...sessionIds], pool),
-    lookupTopics([...topicIds], pool),
-  ]);
-
-  // Apply context to each fact
-  for (const fact of facts) {
-    if (fact._sessionId && sessionMap.has(fact._sessionId)) {
-      const s = sessionMap.get(fact._sessionId)!;
-      fact._omoTaskId = fact._omoTaskId || s.omo_task_id;
-      if (!fact._sessionId)
-        fact._sessionId = s.opencode_session_id || fact._sessionId;
-    }
-
-    if (fact._topicSegmentId && topicMap.has(fact._topicSegmentId)) {
-      const t = topicMap.get(fact._topicSegmentId)!;
-      fact._topicSummary = t.summary;
-    }
-
-    // Fallback timestamp
-    if (!fact._timestamp) {
-      fact._timestamp = fact.metadata.createdAt || new Date().toISOString();
-    }
-  }
-
-  return facts;
-}
-
-async function lookupSessions(
-  ids: string[],
-  pool: Pool,
-): Promise<
-  Map<string, { opencode_session_id?: string; omo_task_id?: string }>
-> {
-  const map = new Map<
-    string,
-    { opencode_session_id?: string; omo_task_id?: string }
-  >();
-  if (ids.length === 0) return map;
-
-  try {
-    const result = await pool.query(
-      `SELECT id, opencode_session_id, omo_task_id FROM session_map WHERE id = ANY($1)`,
-      [ids],
-    );
-    for (const row of result.rows) {
-      map.set(row.id, {
-        opencode_session_id: row.opencode_session_id,
-        omo_task_id: row.omo_task_id,
-      });
-    }
-  } catch {
-    // session_map may not exist, try sessions
-    try {
-      const result = await pool.query(
-        `SELECT id, external_id FROM sessions WHERE id = ANY($1)`,
-        [ids],
-      );
-      for (const row of result.rows) {
-        map.set(row.id, { opencode_session_id: row.external_id });
-      }
-    } catch {
-      // Both failed — context will be sparse
-    }
-  }
-
-  return map;
-}
-
-async function lookupTopics(
-  ids: string[],
-  pool: Pool,
-): Promise<Map<string, { summary?: string }>> {
-  const map = new Map<string, { summary?: string }>();
-  if (ids.length === 0) return map;
-
-  try {
-    const result = await pool.query(
-      `SELECT id, summary FROM topic_segments WHERE id = ANY($1)`,
-      [ids],
-    );
-    for (const row of result.rows) {
-      map.set(row.id, { summary: row.summary });
-    }
-  } catch {
-    // topic_segments may not exist
-  }
-
-  return map;
-}
-
-// ============================================================
-// Helpers: type mapping, data payload builder, vector formatting
-// ============================================================
-
-function mapType(
-  type: "entity" | "observation" | "reflection" | "relation" | "message",
-): "entity" | "observation" | "reflection" | "relation" {
-  if (type === "message") return "observation"; // legacy messages → observation
-  if (type === "relation") return "relation";
-  return type;
-}
-
-function buildDataPayload(fact: InternalFact): Record<string, any> {
-  return {
-    name: fact.metadata.entityType,
-    type: fact.type,
-    content: fact.content,
-    confidence: fact.metadata.confidence,
-    importance: fact.metadata.importance || fact.metadata.weight,
-    created_at: fact.metadata.createdAt || fact._timestamp,
-    pattern_type: fact.metadata.patternType,
-    relation_type: fact.metadata.relationType,
-    related_entity: fact.metadata.relatedEntity,
-    tool_name: fact.metadata.toolName,
-    ...fact.metadata,
-  };
-}
-
-/** Format a number[] as a pgvector literal string: '[0.1,0.2,...]' */
-function formatVectorLiteral(embedding: number[]): string {
-  return `[${embedding.join(",")}]`;
+function norm(v: number[]): number[] {
+  const m = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  return m === 0 ? v.slice() : v.map((x) => x / m);
 }

@@ -4,6 +4,7 @@ import { SemanticCache, CacheResult } from "../types";
 import { createLogger } from "../services/logger";
 
 const logger = createLogger("semantic-cache");
+// TODO(v4.0): for large caches, bypass full scan with query_hash index lookup
 
 export interface SemanticCacheConfig {
   initialThreshold: number;

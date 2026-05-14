@@ -27,7 +27,6 @@ import {
   hindsightReflect,
   HindsightReflectInput,
 } from "./src/mcp/hindsight-reflect";
-import { importDocument, ImportDocumentInput } from "./src/mcp/import-document";
 import {
   applyReflection,
   ApplyReflectionInput,
@@ -178,40 +177,6 @@ const TOOLS: Tool[] = [
       required: [],
     },
   },
-  {
-    name: "import_document",
-    description:
-      "[DEPRECATED] 将外部文档原子性导入记忆库。v3.9+ 不再维护——Agent 不需要文档切片，仅操作记忆有价值。功能保留但不会继续改进。",
-    inputSchema: {
-      type: "object",
-      properties: {
-        source: {
-          type: "string",
-          description:
-            "文档唯一标识，推荐格式：相对路径#段落标识（如 docs/ARCHITECTURE.md#section-3）",
-        },
-        content: {
-          type: "string",
-          description: "文档内容（纯文本，将由服务端自动按语义边界分块）",
-        },
-        session_id: {
-          type: "string",
-          description: "可选的 session_id，不传则使用默认可用 session",
-        },
-        overlap: {
-          type: "integer",
-          default: 100,
-          description: "语义边界标识之间的重叠字符数",
-        },
-        chunk_size: {
-          type: "integer",
-          default: 1500,
-          description: "每个分块的最大字符数",
-        },
-      },
-      required: ["source", "content"],
-    },
-  },
   // ── New v3.0 tools ────────────────────────────────────
   {
     name: "get_memory",
@@ -237,22 +202,6 @@ const TOOLS: Tool[] = [
           type: "string",
           enum: ["observation", "reflection", "entity"],
           description: "Memory type hint",
-        },
-      },
-      required: ["id"],
-    },
-  },
-  {
-    name: "timeline",
-    description:
-      "Fetch a single memory by ID with full details. Supports observations, reflections, and entities.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: {
-          type: "string",
-          description:
-            "Memory UUID from observations, reflections, or entities table",
         },
       },
       required: ["id"],
@@ -549,30 +498,6 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
     }
     const result = await hindsightReflect(
       args as unknown as HindsightReflectInput,
-      pool,
-    );
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
-  },
-
-  import_document: async (args, pool) => {
-    if (!args.source || !args.content) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: false,
-              error: "Missing required parameters: source, content",
-            }),
-          },
-        ],
-        isError: true,
-      };
-    }
-    const result = await importDocument(
-      args as unknown as ImportDocumentInput,
       pool,
     );
     return {
@@ -1012,56 +937,46 @@ async function main() {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
+    // Helper: normalize tool response to { success, data/error } MCP format
+    const respond = (result: unknown, isError = false) => ({
+      content: [{ type: "text" as const, text: JSON.stringify(result) }],
+      ...(isError ? { isError: true } : {}),
+    });
+
     // DB not ready — all tools return the same error
     if (!dbReady || !pool) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: false,
-              error: "Database unavailable — check PostgreSQL connection",
-            }),
-          },
-        ],
-        isError: true,
-      };
+      return respond(
+        {
+          success: false,
+          error: "Database unavailable — check PostgreSQL connection",
+        },
+        true,
+      );
     }
 
     if (!args) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: false,
-              error: "Missing arguments",
-            }),
-          },
-        ],
-        isError: true,
-      };
+      return respond({ success: false, error: "Missing arguments" }, true);
     }
 
     try {
       const handler = TOOL_HANDLERS[name];
       if (!handler) throw new Error(`Unknown tool: ${name}`);
-      return await handler(args as Record<string, unknown>, pool);
+      const result = await handler(args as Record<string, unknown>, pool);
+      // Normalize: wrap bare returns in { success: true, data }
+      if (result && typeof result === "object" && "success" in result) {
+        return respond(result);
+      }
+      return respond({ success: true, data: result });
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Unknown error";
       logger.error(`ERROR: ${msg}`);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: false,
-              error: error instanceof Error ? error.message : "Unknown error",
-            }),
-          },
-        ],
-        isError: true,
-      };
+      return respond(
+        {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        },
+        true,
+      );
     }
   });
 

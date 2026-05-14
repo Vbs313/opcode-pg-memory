@@ -15,6 +15,7 @@ import { enqueueObservation } from "../services/memory-buffer";
 import { addObservation } from "../services/short-term-memory";
 import { extractEntities } from "../services/entity-extractor";
 import { storeEntitiesAndRelations } from "../services/entity-store";
+import { detectCausalChain } from "../services/causal-chain-detector";
 
 const logger = createLogger("tool-execute");
 
@@ -273,43 +274,13 @@ export async function handleToolExecuteAfter(
     }
 
     // ── Causal chain detection: failure→fix pattern ──
-    // If this tool call succeeded, check if the same tool failed recently
-    if (result.success && observationId && sessionInternalId) {
-      try {
-        // Find the most recent failed observation with same tool, within 5 min
-        const { rows: priorFails } = await pool.query(
-          `SELECT id, created_at FROM observations
-           WHERE session_map_id = $1
-             AND tool_name = $2
-             AND tool_status = 'failed'
-             AND causal_chain_id IS NULL
-             AND created_at > NOW() - INTERVAL '5 minutes'
-           ORDER BY created_at DESC
-           LIMIT 1`,
-          [sessionInternalId, tool.name],
-        );
-        if (priorFails.length > 0) {
-          const chainId = crypto.randomUUID();
-          // Mark the failed observation as cause
-          await pool.query(
-            `UPDATE observations SET causal_chain_id = $1, causal_role = 'cause'
-             WHERE id = $2`,
-            [chainId, priorFails[0].id],
-          );
-          // Mark this success as fix
-          await pool.query(
-            `UPDATE observations SET causal_chain_id = $1, causal_role = 'fix'
-             WHERE id = $2`,
-            [chainId, observationId],
-          );
-          logger.info(
-            `Causal chain detected: ${tool.name} fail→fix (${chainId.substring(0, 8)})`,
-          );
-        }
-      } catch {
-        // Non-fatal: chain detection failure
-      }
-    }
+    detectCausalChain(
+      pool,
+      sessionInternalId,
+      tool.name,
+      String(observationId),
+      result,
+    ).catch(() => {});
 
     // ── Entity extraction: populate knowledge graph from tool outputs ──
     if (sessionInternalId && result.data && tool.name) {

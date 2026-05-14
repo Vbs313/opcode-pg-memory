@@ -96,3 +96,89 @@ export function resolveConfig(varName: string): string | undefined {
 }
 
 export type { PgMemoryConfig };
+
+// ============================================================
+// Output compression rules (extracted from output-compressor.ts)
+// ============================================================
+
+export interface CompressionRule {
+  match: RegExp;
+  stripLines?: RegExp[];
+  maxLines?: number;
+  onEmpty?: string;
+}
+
+const DEFAULT_COMPRESSION_RULES: CompressionRule[] = [
+  {
+    match: /^npm\s+(install|ci|i)\b/,
+    stripLines: [
+      /^\s*$/,
+      /^npm (notice|warn|info) /,
+      /^up to date/i,
+      /^added \d+/,
+      /^removed \d+/,
+      /^\d+ packages?( are| is)/i,
+      /^found \d+/i,
+      /^audited \d+/i,
+    ],
+    maxLines: 60,
+    onEmpty: "npm install completed",
+  },
+  {
+    match: /^pnpm\s+(install|i|add)\b/,
+    stripLines: [
+      /^\s*$/,
+      /^\+[\w@]/,
+      /^(Progress|Resolving|Fetching|Downloading|Extracting)/i,
+    ],
+    maxLines: 40,
+    onEmpty: "pnpm install completed",
+  },
+  {
+    match: /^(ls|list)\b/,
+    stripLines: [/^total \d+$/, /^\s*$/],
+    maxLines: 80,
+    onEmpty: "(empty directory)",
+  },
+  { match: /^find\b/, maxLines: 100, onEmpty: "(no files found)" },
+  { match: /^grep\b/, maxLines: 100, onEmpty: "(no matches)" },
+  { match: /^(cat|read)\b/, stripLines: [/^\s*$/], maxLines: 150 },
+  {
+    match: /^git\s+diff\b/,
+    stripLines: [
+      /^diff --git /,
+      /^index [0-9a-f]+\.\./,
+      /^--- a\//,
+      /^\+\+\+ b\//,
+    ],
+    maxLines: 150,
+    onEmpty: "(no diff)",
+  },
+  { match: /^git\s+log\b/, maxLines: 60 },
+  { match: /^git\s+status\b/, maxLines: 40 },
+  {
+    match: /^cargo\s+(build|check|test)\b/,
+    stripLines: [/^\s*$/, /^(Compiling|Checking|Finished| Downloaded)/],
+    maxLines: 80,
+    onEmpty: "cargo completed",
+  },
+  {
+    match: /^dotnet\s+build\b/,
+    stripLines: [/^\s*$/, /^(MSBuild|Build |Determining)/, /^\s+\w+ -> /],
+    maxLines: 60,
+  },
+  {
+    match: /^psql\b/,
+    stripLines: [/^\s*$/, /^sslmode/i, /^SSL connection/i],
+    maxLines: 80,
+  },
+];
+
+let _compressionRules: CompressionRule[] | null = null;
+
+export function getCompressionRules(): CompressionRule[] {
+  if (!_compressionRules) {
+    _compressionRules = DEFAULT_COMPRESSION_RULES;
+  }
+  return _compressionRules;
+}

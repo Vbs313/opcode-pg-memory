@@ -14,6 +14,7 @@
  */
 
 import { createLogger } from "../services/logger";
+import { CompressionRule, getCompressionRules } from "../config";
 
 const logger = createLogger("output-compressor");
 
@@ -27,114 +28,6 @@ const MAX_LENGTH = parseInt(
 );
 const MAX_LINES = 200;
 const REPEATED_LINE_LIMIT = 5;
-
-// ============================================================
-// Command-specific filter definitions
-// 对标 rtk 的 TOML filter: match_command + strip_lines + max_lines + on_empty
-// ============================================================
-
-interface CommandFilter {
-  match: RegExp;
-  stripLines?: RegExp[];
-  maxLines?: number;
-  onEmpty?: string;
-}
-
-const COMMAND_FILTERS: CommandFilter[] = [
-  {
-    // npm install / ci / i: 去噪行, 保留 warning/error
-    match: /^npm\s+(install|ci|i)\b/,
-    stripLines: [
-      /^\s*$/,
-      /^npm (notice|warn|info) /,
-      /^up to date/i,
-      /^added \d+/,
-      /^removed \d+/,
-      /^\d+ packages?( are| is)/i,
-      /^found \d+/i,
-      /^audited \d+/i,
-    ],
-    maxLines: 60,
-    onEmpty: "npm install completed",
-  },
-  {
-    // pnpm install
-    match: /^pnpm\s+(install|i|add)\b/,
-    stripLines: [
-      /^\s*$/,
-      /^\+[\w@]/,
-      /^(Progress|Resolving|Fetching|Downloading|Extracting)/i,
-    ],
-    maxLines: 40,
-    onEmpty: "pnpm install completed",
-  },
-  {
-    // ls / list: 只保留文件名
-    match: /^(ls|list)\b/,
-    stripLines: [/^total \d+$/, /^\s*$/],
-    maxLines: 80,
-    onEmpty: "(empty directory)",
-  },
-  {
-    // find: 路径列表
-    match: /^find\b/,
-    maxLines: 100,
-    onEmpty: "(no files found)",
-  },
-  {
-    // grep: 匹配行
-    match: /^grep\b/,
-    maxLines: 100,
-    onEmpty: "(no matches)",
-  },
-  {
-    // cat / read: 大文件
-    match: /^(cat|read)\b/,
-    stripLines: [/^\s*$/],
-    maxLines: 150,
-  },
-  {
-    // git diff: 去文件头, 保留实际 diff
-    match: /^git\s+diff\b/,
-    stripLines: [
-      /^diff --git /,
-      /^index [0-9a-f]+\.\./,
-      /^--- a\//,
-      /^\+\+\+ b\//,
-    ],
-    maxLines: 150,
-    onEmpty: "(no diff)",
-  },
-  {
-    // git log
-    match: /^git\s+log\b/,
-    maxLines: 60,
-  },
-  {
-    // git status
-    match: /^git\s+status\b/,
-    maxLines: 40,
-  },
-  {
-    // cargo build / check / test
-    match: /^cargo\s+(build|check|test)\b/,
-    stripLines: [/^\s*$/, /^(Compiling|Checking|Finished| Downloaded)/],
-    maxLines: 80,
-    onEmpty: "cargo completed",
-  },
-  {
-    // dotnet build
-    match: /^dotnet\s+build\b/,
-    stripLines: [/^\s*$/, /^(MSBuild|Build |Determining)/, /^\s+\w+ -> /],
-    maxLines: 60,
-  },
-  {
-    // psql: 去除连接噪音
-    match: /^psql\b/,
-    stripLines: [/^\s*$/, /^sslmode/i, /^SSL connection/i],
-    maxLines: 80,
-  },
-];
 
 // ============================================================
 // Duplicate read prevention (openwolf 思路)
@@ -170,7 +63,7 @@ function registerRead(
   return { isDuplicate: count > 2, readCount: count };
 }
 
-export function clearReadRegistry(sessionId: string): void {
+function clearReadRegistry(sessionId: string): void {
   fileReadRegistry.delete(sessionId);
 }
 
@@ -192,7 +85,9 @@ function detectTool(toolName?: string): string {
 export function compressOutput(
   output: string,
   options?: { toolName?: string; sessionId?: string; filePath?: string },
+  rules?: CompressionRule[],
 ): CompressionResult | null {
+  const effectiveRules = rules || getCompressionRules();
   if (!output || output.length < 500) return null;
   const originalChars = output.length;
   let result = output;
@@ -217,8 +112,8 @@ export function compressOutput(
   }
 
   // ── Stage 2: 命令特定 filter ──
-  let mf: CommandFilter | undefined;
-  for (const f of COMMAND_FILTERS) {
+  let mf: CompressionRule | undefined;
+  for (const f of effectiveRules) {
     if (f.match.test(tool)) {
       mf = f;
       break;
