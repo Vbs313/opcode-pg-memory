@@ -3,7 +3,7 @@ import { SessionCompletedInput, SessionCompletedOutput } from "../types";
 import { createLogger } from "../services/logger";
 import { hindsightReflect } from "../mcp/hindsight-reflect";
 import { applyReflection } from "../mcp/apply-reflection";
-import { writeSkillFromReflection } from "../services/skill-writer";
+import { shouldWriteSkill, writeSkillDual } from "../services/skill-writer";
 
 const logger = createLogger("session-completed");
 
@@ -275,28 +275,27 @@ async function executeReflection(
     let skillCount = 0;
     for (const ref of generated_reflections) {
       if (ref.confidence >= 0.8 && (ref as any).action_plan) {
-        // 1. 始终写入 rules.md（低价值规则也适合平面追加）
+        // 1. 始终写入 rules.md（所有有 action_plan 的模式）
         const appResult = await applyReflection({ pattern_id: ref.id }, pool);
         if (appResult.applied) {
           appliedCount++;
           logger.info(`Auto-applied ${ref.id} (${ref.pattern_type})`);
         }
-        // 2. 仅高价值模式写入 skills/（confidence ≥ 0.85 + 非简单 rule）
-        const plan = (ref as any).action_plan;
-        const isHighValue =
-          ref.confidence >= 0.85 && plan?.action?.type !== "rule";
-        if (isHighValue) {
-          writeSkillFromReflection({
-            pattern_type: ref.pattern_type,
-            summary: ref.summary,
-            confidence: ref.confidence,
-            action_plan: plan,
-            id: ref.id!.toString(),
-          })
-            .then((path) => {
-              if (path) {
+        // 2. P4: 质量门控 — 仅高价值非规则模式生成 Skill
+        const pattern = {
+          pattern_type: ref.pattern_type,
+          summary: ref.summary,
+          confidence: ref.confidence,
+          action_plan: (ref as any).action_plan,
+          id: ref.id!.toString(),
+        };
+        if (shouldWriteSkill(pattern)) {
+          // 双路径写入: skills/auto/ + ~/.config/opencode/skills/
+          writeSkillDual(pattern)
+            .then((paths) => {
+              if (paths.length > 0) {
                 skillCount++;
-                logger.info(`Skill written: ${path}`);
+                logger.info(`Skills written: ${paths.join(", ")}`);
               }
             })
             .catch((err: Error) =>
@@ -312,6 +311,7 @@ async function executeReflection(
           autoReflected: true,
           reflectionCount: generated_reflections.length,
           autoApplied: appliedCount,
+          autoSkillCount: skillCount,
         }),
         sessionMapId,
       ],
