@@ -75,7 +75,7 @@ export interface PluginEvent {
   timestamp: number;
   version: number;
   source: "hook" | "poll";
-  data: Record<string, any>; // 事件属性由 OpenCode 定义，类型灵活
+  data: Record<string, unknown>; // 事件属性由 OpenCode 定义，使用时需类型守卫
 }
 
 export interface VersionedRow {

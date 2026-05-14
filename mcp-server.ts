@@ -62,6 +62,12 @@ import type {
 } from "./src/mcp/session-logger";
 import { createLogger } from "./src/services/logger";
 import { getDatabaseConfig } from "./src/config";
+import {
+  RECALL_MEMORY_DESCRIPTION,
+  RECALL_MEMORY_ARGS,
+  HINDSIGHT_REFLECT_DESCRIPTION,
+  HINDSIGHT_REFLECT_ARGS,
+} from "./src/services/tool-registry";
 
 const logger = createLogger("mcp-server");
 
@@ -72,108 +78,19 @@ const dbConfig = getDatabaseConfig();
 const TOOLS: Tool[] = [
   {
     name: "recall_memory",
-    description:
-      "从长期记忆中检索相关事实、实体、观察和反思，支持多策略并行检索（语义+BM25+图遍历）。使用多维评分函数：Relevance = 0.5*SemSim + 0.3/(1+RecencyDays) + 0.2*Importance",
+    description: RECALL_MEMORY_DESCRIPTION,
     inputSchema: {
       type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "检索查询文本",
-        },
-        session_id: {
-          type: "string",
-          description: "当前会话ID，用于上下文过滤",
-        },
-        retrieval_strategies: {
-          type: "array",
-          items: {
-            enum: ["semantic", "bm25", "graph", "keyword"],
-          },
-          default: ["semantic", "bm25", "graph"],
-          description: "检索策略组合",
-        },
-        max_results: {
-          type: "integer",
-          default: 10,
-          minimum: 1,
-          maximum: 50,
-          description: "返回结果数量上限",
-        },
-        filters: {
-          type: "object",
-          properties: {
-            entity_types: {
-              type: "array",
-              items: { type: "string" },
-              description: "实体类型过滤",
-            },
-            tier_levels: {
-              type: "array",
-              items: { enum: ["permanent", "project", "session"] },
-              description: "层级过滤",
-            },
-            min_confidence: {
-              type: "number",
-              minimum: 0,
-              maximum: 1,
-              default: 0.5,
-              description: "最低置信度",
-            },
-            time_range_days: {
-              type: "integer",
-              description: "时间范围（天）",
-            },
-          },
-        },
-        rerank: {
-          type: "boolean",
-          default: true,
-          description: "是否使用交叉编码器重排序",
-        },
-      },
-      required: ["query"], // session_id 可选：未提供时自动检测最近活跃 session
+      properties: RECALL_MEMORY_ARGS,
+      required: ["query"],
     },
   },
   {
     name: "hindsight_reflect",
-    description:
-      "对会话/任务/话题段的观察进行反思，归纳经验模式，生成可复用的反思记录。",
+    description: HINDSIGHT_REFLECT_DESCRIPTION,
     inputSchema: {
       type: "object",
-      properties: {
-        session_id: {
-          type: "string",
-          description: "OpenCode 会话 ID（可选，三选一）",
-        },
-        omo_task_id: {
-          type: "string",
-          description: "OmO 任务 ID（可选，三选一）",
-        },
-        topic_segment_id: {
-          type: "string",
-          description: "特定话题段 ID（可选，三选一）",
-        },
-        trigger_type: {
-          type: "string",
-          enum: ["threshold", "scheduled", "manual"],
-          default: "threshold",
-          description: "触发类型",
-        },
-        observation_threshold: {
-          type: "integer",
-          default: 30,
-          minimum: 10,
-          maximum: 100,
-          description: "触发反思的观察数量阈值",
-        },
-        model_size: {
-          type: "string",
-          enum: ["7b", "14b", "full"],
-          default: "7b",
-          description: "使用的模型规模",
-        },
-      },
+      properties: HINDSIGHT_REFLECT_ARGS,
       required: [],
     },
   },
