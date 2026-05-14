@@ -19,6 +19,10 @@ import {
   searchSimilarSkills,
   indexAllGlobalSkills,
 } from "../services/skill-indexer";
+import {
+  recordMigration,
+  computeReputation,
+} from "../services/skill-reputation";
 
 const logger = createLogger("session-created");
 
@@ -83,7 +87,7 @@ export async function handleSessionCreated(
 
     logger.info(`Retrieved ${facts.length} facts for injection`);
 
-    // 4. v3.19: 跨项目技能推荐（基于项目指纹）
+    // 4. v4.0: 跨项目技能推荐（指纹匹配 + 声誉加权）
     let skillRecommendations: string[] = [];
     try {
       const projectId = session.projectId || session.id;
@@ -91,17 +95,42 @@ export async function handleSessionCreated(
       if (fingerprint.embedding) {
         indexAllGlobalSkills(pool, projectId).catch(() => {});
         const skills = await searchSimilarSkills(pool, fingerprint.embedding, {
-          limit: 3,
+          limit: 5,
           minSimilarity: 0.5,
           excludeProjectId: projectId,
           excludeDeprecated: true,
         });
-        skillRecommendations = skills.map(
-          (s) => `[${s.pattern_type || "skill"}] ${s.skill_name} v${s.version}`,
+
+        // v4.0: 声誉加权排序
+        const scored = await Promise.all(
+          skills.map(async (s) => {
+            const rep = await computeReputation(pool, s.skill_name);
+            return { ...s, reputation: rep?.reputation || 0, rep };
+          }),
         );
+        scored.sort((a, b) => b.reputation - a.reputation);
+
+        for (const s of scored.slice(0, 3)) {
+          // 记录跨项目迁移事件
+          if (s.project_id && s.project_id !== projectId) {
+            recordMigration(pool, s.skill_name, s.project_id, projectId).catch(
+              () => {},
+            );
+          }
+
+          const repTag =
+            s.reputation >= 7
+              ? "⭐ 高声誉"
+              : s.reputation >= 4
+                ? "● 中等声誉"
+                : "○ 新技能";
+          skillRecommendations.push(
+            `[${s.pattern_type || "skill"}] ${s.skill_name} v${s.version} ${repTag} (${s.reputation}/10)`,
+          );
+        }
         if (skillRecommendations.length > 0) {
           logger.info(
-            `Cross-project skills: ${skillRecommendations.join("; ")}`,
+            `Cross-project skills (reputation-weighted): ${skillRecommendations.join("; ")}`,
           );
         }
       }

@@ -63,6 +63,15 @@ import type {
 import { createLogger } from "./src/services/logger";
 import { getDatabaseConfig } from "./src/config";
 import {
+  searchNetwork,
+  NetworkSearchInput,
+  NetworkSearchOutput,
+} from "./src/mcp/network-search";
+import {
+  getTopReputationSkills,
+  ReputationScore,
+} from "./src/services/skill-reputation";
+import {
   RECALL_MEMORY_DESCRIPTION,
   RECALL_MEMORY_ARGS,
   HINDSIGHT_REFLECT_DESCRIPTION,
@@ -355,6 +364,61 @@ const TOOLS: Tool[] = [
           type: "number",
           default: 50,
           description: "返回上限",
+        },
+      },
+    },
+  },
+  {
+    name: "search_network",
+    description:
+      "v4.0 联邦式认知网络检索 — 跨项目搜索技能、记忆和知识图谱实体。返回结果附带声誉评分。scope: skills/memories/entities/all",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "搜索查询文本",
+        },
+        scope: {
+          type: "string",
+          enum: ["skills", "memories", "entities", "all"],
+          default: "all",
+          description: "搜索范围",
+        },
+        min_reputation: {
+          type: "number",
+          default: 0,
+          description: "最低声誉评分阈值 (0-10)",
+        },
+        max_results: {
+          type: "number",
+          default: 20,
+          description: "最大返回结果数",
+        },
+        exclude_project_id: {
+          type: "string",
+          description: "排除指定项目 ID",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "skill_reputation",
+    description:
+      "v4.0 技能声誉排行 — 列出跨项目技能声誉评分，按综合声誉降序。声誉 = 成功率×0.5 + 采用率×0.3 + 近度×0.2",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "number",
+          default: 20,
+          description: "返回上限",
+        },
+        min_reputation: {
+          type: "number",
+          default: 0,
+          description: "最低声誉评分",
         },
       },
     },
@@ -710,6 +774,30 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const result = await reviewRules(args as unknown as ReviewRulesInput, pool);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  },
+
+  // v4.0: 联邦式网络检索
+  search_network: async (args, pool) => {
+    const result = await searchNetwork(
+      args as unknown as NetworkSearchInput,
+      pool,
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  },
+
+  // v4.0: 技能声誉排行
+  skill_reputation: async (_args, pool) => {
+    const skills = await getTopReputationSkills(pool, { limit: 20 });
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ success: true, skills }, null, 2),
+        },
+      ],
     };
   },
 };
