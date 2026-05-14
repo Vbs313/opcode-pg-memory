@@ -1,21 +1,26 @@
-import { Pool } from 'pg';
-import { 
-  SessionCreatedInput, 
-  SessionCreatedOutput, 
+import { Pool } from "pg";
+import {
+  SessionCreatedInput,
+  SessionCreatedOutput,
   RetrievedFact,
   Entity,
-  Reflection 
-} from '../types';
-import { 
-  calculateTokenBudget, 
-  formatEntity, 
+  Reflection,
+} from "../types";
+import {
+  calculateTokenBudget,
+  formatEntity,
   formatReflection,
-  estimateTokens 
-} from '../utils/token-budget';
-import { createLogger } from '../services/logger';
-import { detectAgentId } from '../services/agent-context';
+  estimateTokens,
+} from "../utils/token-budget";
+import { createLogger } from "../services/logger";
+import { detectAgentId } from "../services/agent-context";
+import { computeProjectFingerprint } from "../services/project-fingerprinter";
+import {
+  searchSimilarSkills,
+  indexAllGlobalSkills,
+} from "../services/skill-indexer";
 
-const logger = createLogger('session-created');
+const logger = createLogger("session-created");
 
 export interface SessionCreatedHandlerConfig {
   contextLimitRatio: number;
@@ -30,64 +35,92 @@ const DEFAULT_CONFIG: SessionCreatedHandlerConfig = {
   minTokens: 500,
   maxTokens: 4000,
   minConfidence: 0.5,
-  minWeight: 0.3
+  minWeight: 0.3,
 };
 
 /**
  * 处理 session.created 事件
- * 
+ *
  * 功能：
  * 1. 创建或更新 session_map 表记录
  * 2. 基于 Token 预算检索 entities 和 reflections
  * 3. 优先注入 permanent 级别事实，其次 project，最后 session
- * 
+ *
  * 签名规范：(input, output) => Promise<void>
  * output 为可变对象，通过突变 output 影响行为
  */
 export async function handleSessionCreated(
   input: SessionCreatedInput,
-  output: SessionCreatedOutput,    // ✅ 添加 output 参数
+  output: SessionCreatedOutput, // ✅ 添加 output 参数
   pool: Pool,
-  config: Partial<SessionCreatedHandlerConfig> = {}
+  config: Partial<SessionCreatedHandlerConfig> = {},
 ): Promise<void> {
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const { session } = input;
-  
+
   logger.info(`Session created: ${session.id}`);
-  
+
   try {
     // 1. 创建或更新 session 记录
     await upsertSession(session, pool);
-    
+
     // 2. 计算 token 预算
-    const budget = calculateTokenBudget(
-      session.model.contextLimit,
-      {
-        contextLimitRatio: mergedConfig.contextLimitRatio,
-        minTokens: mergedConfig.minTokens,
-        maxTokens: mergedConfig.maxTokens
-      }
-    );
-    
+    const budget = calculateTokenBudget(session.model.contextLimit, {
+      contextLimitRatio: mergedConfig.contextLimitRatio,
+      minTokens: mergedConfig.minTokens,
+      maxTokens: mergedConfig.maxTokens,
+    });
+
     logger.info(`Token budget for injection: ${budget}`);
-    
+
     // 3. 检索事实
     const facts = await retrieveFactsForInjection(
       session.id,
       budget,
       pool,
-      mergedConfig
+      mergedConfig,
     );
-    
+
     logger.info(`Retrieved ${facts.length} facts for injection`);
-    
-    // 4. 格式化输出 → 突变 output
-    const memories = facts.map(f => f.content);
-    
+
+    // 4. v3.19: 跨项目技能推荐（基于项目指纹）
+    let skillRecommendations: string[] = [];
+    try {
+      const projectId = session.projectId || session.id;
+      const fingerprint = await computeProjectFingerprint(pool, projectId);
+      if (fingerprint.embedding) {
+        indexAllGlobalSkills(pool, projectId).catch(() => {});
+        const skills = await searchSimilarSkills(pool, fingerprint.embedding, {
+          limit: 3,
+          minSimilarity: 0.5,
+          excludeProjectId: projectId,
+          excludeDeprecated: true,
+        });
+        skillRecommendations = skills.map(
+          (s) => `[${s.pattern_type || "skill"}] ${s.skill_name} v${s.version}`,
+        );
+        if (skillRecommendations.length > 0) {
+          logger.info(
+            `Cross-project skills: ${skillRecommendations.join("; ")}`,
+          );
+        }
+      }
+    } catch (err) {
+      logger.debug("Cross-project skill recommendation skipped:", err);
+    }
+
+    // 5. 格式化输出 → 突变 output
+    const memories = facts.map((f) => f.content);
+    if (skillRecommendations.length > 0) {
+      memories.push(
+        `## 跨项目技能推荐\n${skillRecommendations.map((s) => `- ${s}`).join("\n")}\n> 使用 get_memory 按需加载完整技能`,
+      );
+    }
+
     // ✅ 正确的钩子签名：mutate output.context
     output.context = { memories };
   } catch (error) {
-    logger.error('Error handling session.created:', error);
+    logger.error("Error handling session.created:", error);
     // 出错时不阻断主流程，output 保持为空对象
   }
 }
@@ -96,8 +129,8 @@ export async function handleSessionCreated(
  * 创建或更新 session 记录
  */
 async function upsertSession(
-  session: SessionCreatedInput['session'],
-  pool: Pool
+  session: SessionCreatedInput["session"],
+  pool: Pool,
 ): Promise<void> {
   const agentId = detectAgentId();
   const query = `
@@ -118,7 +151,7 @@ async function upsertSession(
     session.model.contextLimit,
     JSON.stringify({
       modelId: session.model.id,
-      modelName: session.model.name
+      modelName: session.model.name,
     }),
     agentId,
   ]);
@@ -132,44 +165,44 @@ async function retrieveFactsForInjection(
   sessionId: string,
   budget: number,
   pool: Pool,
-  config: SessionCreatedHandlerConfig
+  config: SessionCreatedHandlerConfig,
 ): Promise<RetrievedFact[]> {
   const facts: RetrievedFact[] = [];
   let usedTokens = 0;
-  
+
   // 按 tier 优先级检索
-  const tierOrder = ['permanent', 'project', 'session'] as const;
+  const tierOrder = ["permanent", "project", "session"] as const;
   const tierAllocation = {
     permanent: Math.floor(budget * 0.5),
     project: Math.floor(budget * 0.3),
-    session: Math.floor(budget * 0.2)
+    session: Math.floor(budget * 0.2),
   };
-  
+
   for (const tier of tierOrder) {
     const tierBudget = tierAllocation[tier];
     let tierUsed = 0;
-    
+
     // 检索 entities
     const entities = await retrieveEntitiesByTier(
-      sessionId, 
-      tier, 
-      pool, 
-      config
+      sessionId,
+      tier,
+      pool,
+      config,
     );
-    
+
     for (const entity of entities) {
       const formatted = formatEntity(entity);
       const tokens = estimateTokens(formatted);
-      
+
       if (tierUsed + tokens <= tierBudget && usedTokens + tokens <= budget) {
         facts.push({
           id: entity.id,
-          type: 'entity',
+          type: "entity",
           content: formatted,
           tier,
           tokens,
           relevanceScore: entity.weight,
-          metadata: { entityId: entity.id, entityType: entity.type }
+          metadata: { entityId: entity.id, entityType: entity.type },
         });
         tierUsed += tokens;
         usedTokens += tokens;
@@ -184,7 +217,7 @@ async function retrieveFactsForInjection(
         sessionId,
         tier,
         pool,
-        config
+        config,
       );
 
       for (const reflection of reflections) {
@@ -194,12 +227,15 @@ async function retrieveFactsForInjection(
         if (tierUsed + tokens <= tierBudget && usedTokens + tokens <= budget) {
           facts.push({
             id: reflection.id,
-            type: 'reflection',
+            type: "reflection",
             content: formatted,
             tier,
             tokens,
             relevanceScore: reflection.confidence,
-            metadata: { reflectionId: reflection.id, patternType: reflection.pattern_type }
+            metadata: {
+              reflectionId: reflection.id,
+              patternType: reflection.pattern_type,
+            },
           });
           tierUsed += tokens;
           usedTokens += tokens;
@@ -209,7 +245,7 @@ async function retrieveFactsForInjection(
       }
     }
   }
-  
+
   return facts;
 }
 
@@ -220,7 +256,7 @@ async function retrieveEntitiesByTier(
   sessionId: string,
   tier: string,
   pool: Pool,
-  config: SessionCreatedHandlerConfig
+  config: SessionCreatedHandlerConfig,
 ): Promise<Entity[]> {
   const query = `
     SELECT * FROM entities
@@ -231,15 +267,15 @@ async function retrieveEntitiesByTier(
     ORDER BY weight DESC, last_seen_at DESC
     LIMIT 50
   `;
-  
+
   const result = await pool.query(query, [
     sessionId,
     tier,
     config.minWeight,
-    config.minConfidence
+    config.minConfidence,
   ]);
-  
-  return result.rows.map(row => ({
+
+  return result.rows.map((row) => ({
     id: row.id,
     session_id: row.session_map_id,
     name: row.name,
@@ -251,7 +287,7 @@ async function retrieveEntitiesByTier(
     first_seen_at: row.first_seen_at,
     last_seen_at: row.last_seen_at,
     confidence: row.confidence,
-    metadata: row.metadata
+    metadata: row.metadata,
   }));
 }
 
@@ -262,7 +298,7 @@ async function retrieveReflectionsByTier(
   sessionId: string,
   tier: string,
   pool: Pool,
-  config: SessionCreatedHandlerConfig
+  config: SessionCreatedHandlerConfig,
 ): Promise<Reflection[]> {
   // reflections 通过关联的 session 和 observation 推断 tier
   // 简化处理：检索与当前 session 相关的 reflections
@@ -273,13 +309,10 @@ async function retrieveReflectionsByTier(
     ORDER BY confidence DESC, created_at DESC
     LIMIT 20
   `;
-  
-  const result = await pool.query(query, [
-    sessionId,
-    config.minConfidence
-  ]);
-  
-  return result.rows.map(row => ({
+
+  const result = await pool.query(query, [sessionId, config.minConfidence]);
+
+  return result.rows.map((row) => ({
     id: row.id,
     session_id: row.session_map_id,
     summary: row.summary,
@@ -288,7 +321,6 @@ async function retrieveReflectionsByTier(
     pattern_type: row.pattern_type,
     created_at: row.created_at,
     embedding: row.embedding,
-    metadata: row.metadata
+    metadata: row.metadata,
   }));
 }
-
