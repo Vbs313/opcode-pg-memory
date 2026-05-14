@@ -745,6 +745,27 @@ async function reflectOnSegment(
       }
 
       if (pattern.confidence >= config.minConfidence) {
+        // ── v3.18: 技能有效性验证 ──
+        // 若此 error_pattern 已有对应的 auto-generated skill，
+        // 检查修补后是否仍出现同类错误 → 标记 declining/deprecated
+        if (pattern.pattern_type === "error_pattern") {
+          const { checkSkillEffectiveness } =
+            await import("../services/skill-writer");
+          const health = await checkSkillEffectiveness(
+            pool,
+            pattern.pattern_type,
+          ).catch(() => null);
+          if (health?.effectiveness === "deprecated") {
+            pattern.applicability =
+              (pattern.applicability || "") +
+              ` [skill deprecated: ${health.name}]`;
+          } else if (health?.effectiveness === "declining") {
+            pattern.applicability =
+              (pattern.applicability || "") +
+              ` [skill declining: ${health.name} — ${health.lastErrorSeen}]`;
+          }
+        }
+
         const reflection = await storeReflection(
           pattern,
           segment,

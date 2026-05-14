@@ -15,12 +15,13 @@
  *   - action_plan.action.type ∈ {"template", "suggestion"}
  */
 
-import { readFile, writeFile, rename, mkdir, readdir, stat } from "fs/promises";
+import { readFile, writeFile, rename, mkdir, readdir } from "fs/promises";
 import { existsSync } from "fs";
 import { join, dirname, basename } from "path";
 import { homedir } from "os";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
+import { Pool } from "pg";
 import { createLogger } from "./logger";
 
 const logger = createLogger("skill-writer");
@@ -360,3 +361,251 @@ export async function writeSkillDual(pattern: PatternInput): Promise<string[]> {
 
 /** @deprecated 使用 writeSkillDual() 获取双路径写入 */
 export { writeSkillToGlobal as writeSkillFromReflection };
+
+// ============================================================
+// v3.18: 技能可观测性 — 追踪 / 有效性验证 / 废弃
+// ============================================================
+
+/**
+ * 技能有效性状态
+ */
+export type SkillEffectiveness = "active" | "declining" | "deprecated";
+
+export interface SkillHealth {
+  name: string;
+  version: string;
+  patchCount: number;
+  effectiveness: SkillEffectiveness;
+  lastErrorSeen?: string;
+}
+
+/**
+ * 统计技能被修补的次数（从 version 字段推断）。
+ * version "1.0.3" → 3 次修补（major.minor 不变时，patch 递增）。
+ */
+function getPatchCount(version: string): number {
+  const parts = version.split(".").map(Number);
+  if (parts.length === 3 && !isNaN(parts[2])) {
+    return parts[2];
+  }
+  return 0;
+}
+
+/**
+ * 记录技能使用事件到 observations 表。
+ * 在 Agent 加载技能时调用，用于追踪技能使用频率和效果。
+ */
+export async function recordSkillUsage(
+  pool: Pool,
+  sessionId: string,
+  skillName: string,
+  version: string,
+): Promise<void> {
+  try {
+    // 获取 session 内部 ID
+    const { rows } = await pool.query(
+      "SELECT id FROM session_map WHERE opencode_session_id = $1",
+      [sessionId],
+    );
+    if (rows.length === 0) return;
+    const sessionMapId = rows[0].id;
+
+    await pool.query(
+      `INSERT INTO observations (session_map_id, tool_name, tool_output_summary, importance, metadata)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        sessionMapId,
+        "skill_loaded",
+        `Loaded skill: ${skillName} v${version}`,
+        2, // 低重要性 — 仅用于统计
+        JSON.stringify({
+          event: "skill.loaded",
+          skill_name: skillName,
+          skill_version: version,
+        }),
+      ],
+    );
+  } catch (err) {
+    // Non-fatal: 追踪失败不影响主流程
+  }
+}
+
+/**
+ * 检查技能有效性：若同一 pattern_type 的技能被修补后仍出现同类错误，
+ * 返回 "declining" 或 "deprecated" 状态。
+ *
+ * @param pool PG 连接池
+ * @param patternType 模式类型（如 "error_pattern"）
+ * @param skillDirName 技能目录名（可选，用于精确匹配）
+ */
+export async function checkSkillEffectiveness(
+  pool: Pool,
+  patternType: string,
+  skillDirName?: string,
+): Promise<SkillHealth | null> {
+  try {
+    const autoDir = getProjectAutoSkillsDir();
+    if (!existsSync(autoDir)) return null;
+
+    const entries = await readdir(autoDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (skillDirName && entry.name !== skillDirName) continue;
+
+      const skillPath = join(autoDir, entry.name, "SKILL.md");
+      if (!existsSync(skillPath)) continue;
+
+      try {
+        const content = await readFile(skillPath, "utf-8");
+        const fm = parseFrontmatter(content);
+
+        // 匹配 pattern_type
+        if (fm.pattern_type !== patternType) continue;
+
+        const version = fm.version || "1.0.0";
+        const patchCount = getPatchCount(version);
+        const status = fm.status as SkillEffectiveness | undefined;
+
+        // 已废弃的技能跳过
+        if (status === "deprecated") {
+          return {
+            name: entry.name,
+            version,
+            patchCount,
+            effectiveness: "deprecated",
+          };
+        }
+
+        // 检查修补后是否仍有错误
+        const { rows: errorRows } = await pool.query(
+          `SELECT COUNT(*) as cnt FROM observations
+           WHERE tool_output_summary ILIKE '%error%'
+             AND importance >= 3
+             AND created_at > (
+               SELECT COALESCE(
+                 (SELECT created_at FROM observations
+                  WHERE metadata->>'event' = 'skill.loaded'
+                    AND metadata->>'skill_name' = $1
+                  ORDER BY created_at DESC LIMIT 1),
+                 NOW() - INTERVAL '30 days'
+               )
+             )`,
+          [entry.name],
+        );
+
+        const recentErrors = parseInt(errorRows[0]?.cnt || "0", 10);
+
+        if (status === "declining" && recentErrors > 0 && patchCount >= 3) {
+          // 连续 3 次修补 + 仍无效 → 废弃
+          await deprecateSkill(entry.name, "3+ patches with no improvement");
+          return {
+            name: entry.name,
+            version,
+            patchCount,
+            effectiveness: "deprecated",
+          };
+        }
+
+        if (recentErrors > 0 && patchCount >= 1) {
+          // 修补后仍有错误 → 标记 declining
+          if (status !== "declining") {
+            await markSkillEffectiveness(entry.name, "declining");
+          }
+          return {
+            name: entry.name,
+            version,
+            patchCount,
+            effectiveness: "declining",
+            lastErrorSeen: `${recentErrors} errors since last load`,
+          };
+        }
+      } catch {
+        // 跳过无法读取的技能
+      }
+    }
+  } catch (err) {
+    logger.debug("Skill effectiveness check skipped:", err);
+  }
+  return null;
+}
+
+/**
+ * 标记技能有效性状态（更新 SKILL.md frontmatter）。
+ */
+async function markSkillEffectiveness(
+  skillDirName: string,
+  effectiveness: SkillEffectiveness,
+): Promise<void> {
+  const autoDir = getProjectAutoSkillsDir();
+  const filePath = join(autoDir, skillDirName, "SKILL.md");
+  if (!existsSync(filePath)) return;
+
+  try {
+    const content = await readFile(filePath, "utf-8");
+    const now = new Date().toISOString();
+
+    // 添加/更新 frontmatter 字段
+    let newContent: string;
+    if (content.includes("status:")) {
+      newContent = content.replace(/^status:.*$/m, `status: ${effectiveness}`);
+    } else {
+      newContent = content.replace(
+        /^license:.*$/m,
+        `status: ${effectiveness}\nlicense: MIT`,
+      );
+    }
+
+    // 更新 updated_at
+    newContent = newContent.replace(/^updated_at:.*$/m, `updated_at: ${now}`);
+
+    await atomicWrite(filePath, newContent);
+    logger.info(`Skill ${skillDirName} marked as ${effectiveness}`);
+  } catch (err) {
+    logger.warn(`Failed to mark skill effectiveness:`, err);
+  }
+}
+
+/**
+ * 废弃技能：标记 status: deprecated + 记录原因。
+ * 废弃的技能不再从活跃注入中加载。
+ */
+async function deprecateSkill(
+  skillDirName: string,
+  reason: string,
+): Promise<void> {
+  const autoDir = getProjectAutoSkillsDir();
+  const filePath = join(autoDir, skillDirName, "SKILL.md");
+  if (!existsSync(filePath)) return;
+
+  try {
+    const content = await readFile(filePath, "utf-8");
+    const now = new Date().toISOString();
+
+    let newContent = content;
+
+    // 添加/更新状态
+    if (content.includes("status:")) {
+      newContent = newContent.replace(/^status:.*$/m, "status: deprecated");
+    } else {
+      newContent = newContent.replace(
+        /^license:.*$/m,
+        "status: deprecated\nlicense: MIT",
+      );
+    }
+
+    // 添加废弃原因
+    if (!newContent.includes("deprecated_reason:")) {
+      newContent = newContent.replace(
+        /^source:.*$/m,
+        `source: opcode-pg-memory\ndeprecated_reason: ${reason}\ndeprecated_at: ${now}`,
+      );
+    }
+
+    newContent = newContent.replace(/^updated_at:.*$/m, `updated_at: ${now}`);
+
+    await atomicWrite(filePath, newContent);
+    logger.info(`Skill ${skillDirName} deprecated: ${reason}`);
+  } catch (err) {
+    logger.warn(`Failed to deprecate skill:`, err);
+  }
+}
